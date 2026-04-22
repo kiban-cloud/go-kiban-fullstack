@@ -1,0 +1,86 @@
+{
+	"version": "2.0.0",
+    "tasks": [
+        {
+            "label": "templ generate",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "tool",
+                "templ",
+                "generate"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared",
+                "showReuseMessage": false,
+                "close": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "live",
+            "detail": "air live-reload. Rebuilds on .go/.templ changes. Manual browser refresh (Cmd+R).",
+            "type": "shell",
+            "command": "go tool air",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "live (auto-reload browser)",
+            "detail": "templ proxy + go run. Opens http://localhost:7331; browser auto-refreshes on rebuild. Slower than air (~2-3s per rebuild) but zero race conditions.",
+            "type": "shell",
+            "command": "go tool templ generate -watch -proxy=http://localhost:$(grep ^PORT= .env | cut -d= -f2) -proxyport=7331 -cmd='go run ./cmd/api'",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "go: build",
+            "type": "go",
+            "command": "build",
+            "args": [
+                "-o",
+                "${workspaceFolder}/cmd/api/main",
+                "${workspaceFolder}/cmd/api"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$go"
+            ]
+        },
+        {
+            "label": "go: test all",
+            "type": "shell",
+            "command": "docker build -t go-test-runner -f Dockerfile.test . && touch \"${workspaceFolder}/domain.out\" \"${workspaceFolder}/all_output_domain.log\" \"${workspaceFolder}/controller.out\" \"${workspaceFolder}/all_output_controller.log\" \"${workspaceFolder}/repository.out\" \"${workspaceFolder}/all_output_repository.log\" && docker run --rm -w /app -v \"${workspaceFolder}/domain.out\":/app/domain.out -v \"${workspaceFolder}/all_output_domain.log\":/app/all_output_domain.log -v \"${workspaceFolder}/controller.out\":/app/controller.out -v \"${workspaceFolder}/all_output_controller.log\":/app/all_output_controller.log -v \"${workspaceFolder}/repository.out\":/app/repository.out -v \"${workspaceFolder}/all_output_repository.log\":/app/all_output_repository.log go-test-runner",
+            "args": [],
+            "problemMatcher": [
+                "$go"
+            ],
+            "group": "test",
+            "detail": "Builds a Docker image and runs the test command defined within the Dockerfile for domain, controller, and repository. Outputs are mapped to the workspace after ensuring they exist as files."
+        }
+    ]
+}

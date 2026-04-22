@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+      {
+          "name": "Debug API",
+          "type": "go",
+          "request": "launch",
+          "mode": "debug",
+          "program": "${workspaceFolder}/cmd/api",
+          "cwd": "${workspaceFolder}",
+          "args": [],
+          "console": "integratedTerminal",
+          "preLaunchTask": "templ generate"
+      },
+      {
+          "name": "Open Browser",
+          "type": "node-terminal",
+          "request": "launch",
+          "command": "sleep 5 && open http://localhost:$(grep ^PORT= ${workspaceFolder}/.env | cut -d= -f2)"
+      }
+  ],
+  "compounds": [
+      {
+          "name": "API + Browser",
+          "configurations": [
+              "Debug API",
+              "Open Browser"
+          ],
+          "stopAll": true
+      }
+  ]
+}

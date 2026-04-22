@@ -1,0 +1,10 @@
+# Go
+*.test
+*.out
+coverage.*
+/bin/
+/tmp/
+
+# IDE
+.idea/
+.DS_Store

@@ -1,0 +1,15 @@
+{
+	"go.testTimeout": "60m",
+	"files.exclude": {
+		"**/*_gen.go": false,
+		"**/*_templ.go": true
+	},
+	"explorer.autoReveal": true,
+	"go.testTags": "integration",
+	"go.buildTags": "integration",
+	"gopls": {
+		"ui.diagnostic.analyses": {
+			"unsafeptr": false
+		}
+	}
+}
