@@ -39,6 +39,7 @@ templ generate                                           # regenera .templ → _
 - **No crees archivos `*.md` ni `README`** salvo que se pida explícitamente.
 - **Prefiere editar** archivos existentes antes que crear nuevos.
 - Al arreglar un bug, **no refactorices** código colindante. Cambio mínimo.
+- **Todo bug que se arregle debe quedar cubierto por un test de regresión** que reproduzca el bug y valide el fix. Detalle del flujo en [Tests de regresión para bugs](#tests-de-regresión-para-bugs).
 - **No añadas comentarios obvios** ni docstrings para código que ya es autoexplicativo. Solo comenta lógica no evidente.
 - **No añadas manejo de errores defensivo** para casos imposibles. Confía en garantías internas; valida solo en bordes (HTTP, repo, servicios externos).
 - Si detectas un bug fuera del alcance del pedido, **menciónalo**; no lo arregles silenciosamente.
@@ -105,6 +106,16 @@ if err := c.ShouldBind(&req); err != nil {
 - Cuando modifiques un `.templ`, ejecuta `templ generate` antes de correr tests.
 - HTMX para interactividad: `hx-post`, `hx-target`, `hx-swap` — no JavaScript custom salvo casos puntuales.
 - Renderizado server-side vía `view.Render(c, status, Component(data))`.
+
+### Texto en español: signos de pregunta y exclamación
+
+Todo texto visible al usuario está en español. **Las preguntas siempre abren con `¿` y cierran con `?`** — la apertura no es opcional. Aplica a títulos de página, copys de botones/links, mensajes en `hx-confirm`, banners de error o éxito y cualquier label. Lo mismo con exclamaciones: abren con `¡` y cierran con `!`.
+
+Ejemplos:
+- ✅ `¿No tienes cuenta?`, `¿Olvidaste tu contraseña?`, `¿Estás seguro de eliminar este contacto?`
+- ❌ `No tienes cuenta?`, `Olvidaste tu contraseña?`, `Estás seguro de eliminar este contacto?`
+
+Cuando agregues una pregunta nueva en cualquier `.templ`, abrí siempre con `¿`. Si refactorizás un componente compartido (ej. modales de confirmación en `view/common/`), respetá el mismo criterio.
 
 ### Tipos que reciben las views — cuándo domain, cuándo viewModel
 
@@ -183,6 +194,30 @@ Toda vista `.templ` debe tener un test que la renderice. Cuando crees una vista 
 - Nombres: `TestFeature_Scenario` (ej. `TestProfile_UpdateAllFields`).
 - Requiere Docker corriendo (testcontainers levanta `mongo:7`).
 
+### Tests de regresión para bugs
+
+**Regla:** todo bug que se arregla queda cubierto por un test que (a) reproduce el bug, (b) falla **antes** del fix, y (c) pasa **después** del fix. No se considera "arreglado" un bug sin este test. Aplica al mismo cambio donde se arregla — no se posterga.
+
+**Flujo obligatorio (red-green):**
+
+1. **Reproducir.** Antes de tocar el código de producción, escribir un test que falle con el mismo síntoma del bug. El test debe afirmar el comportamiento correcto, no el observado.
+2. **Confirmar rojo.** Correr el test para verificar que efectivamente falla con el bug presente. Si pasa, el test no está reproduciendo el bug — repensar la aserción.
+3. **Arreglar.** Cambio mínimo en el código de producción.
+4. **Confirmar verde.** Correr el test; debe pasar. Correr la suite completa (`go test ./...` + integration si aplica) para no romper otros casos.
+
+**Dónde poner el test (mismo criterio que el resto de la suite):**
+
+- Bug en una rama de `Execute` de un usecase → subtest nuevo en el `_test.go` del usecase, en la **misma posición** que la rama dentro de `Execute` (recordá: orden de subtests = orden del código).
+- Bug en lo que renderiza un `.templ` (URL incorrecta, atributo faltante, escapado mal, condicional roto) → test nuevo en `view/<pkg>/<templ>_test.go` con assertions sobre el HTML emitido (`strings.Contains` sobre el body).
+- Bug en el flujo HTTP (middleware, status code, header, redirect, cookie) → test nuevo en `tests/integration/<feature>_test.go`.
+- Bug que requiere DB + HTTP juntos → integration test que afirme **ambos** lados (respuesta + estado en Mongo).
+
+**Nombre del test:** describir el comportamiento correcto, no el bug. `TestPortalCommentsForm_IncludesTokenInPostURL` (lo que debe hacer) en lugar de `TestPortalCommentsForm_BugTokenMissing` (lo que rompía). Quien lea el test después no debería necesitar saber que hubo un bug.
+
+**Verificación red→green explícita.** Cuando arreglés un bug, dejá constancia en la respuesta de que ejecutaste los pasos 2 y 4 — por ejemplo, un revert temporal del fix para confirmar que el test atrapa la regresión, y luego restaurá el fix. No es opcional: sin este paso, el test puede pasar trivialmente sin estar verificando lo que crees.
+
+**Cuándo se permite saltearlo:** nunca. Si el bug está en un punto que físicamente no se puede testear (ej. arranque del proceso, código de boot que panic), el "test" puede ser un assert de configuración o un check estático — pero algo debe quedar registrado.
+
 ## Seguridad
 
 - Nunca loguear passwords, tokens, API keys ni firmas de webhook.
@@ -202,3 +237,4 @@ Toda vista `.templ` debe tener un test que la renderice. Cuando crees una vista 
 3. Si tocaste `.templ`, `templ generate` corrido **y** tests de views agregados/actualizados. `go test ./internal/view/<pkg>/... -cover` verde.
 4. Si tocaste algo bajo `tests/integration/`, documenta cómo correrlo en la respuesta.
 5. Si tocaste un usecase, `go test ./internal/usecases/<feature>/<action>/...` verde y el checklist de unit tests aplicado.
+6. **Si arreglaste un bug**: hay test de regresión nuevo o actualizado, y verificaste que falla sin el fix y pasa con el fix (ver [Tests de regresión para bugs](#tests-de-regresión-para-bugs)). Reportalo explícitamente en la respuesta.
