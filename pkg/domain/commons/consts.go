@@ -9,11 +9,15 @@ import (
 type ENV string
 
 var ENVS = struct {
-	DEV  ENV
-	PROD ENV
+	LOCAL  ENV
+	DEV    ENV
+	HOTFIX ENV
+	PROD   ENV
 }{
-	DEV:  "develop",
-	PROD: "production",
+	LOCAL: "localhost",
+	DEV:    "develop",
+	HOTFIX: "hotfix",
+	PROD:   "production",
 }
 
 type LOG_LEVEL string
