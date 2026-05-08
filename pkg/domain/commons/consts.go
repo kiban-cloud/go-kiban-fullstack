@@ -36,7 +36,7 @@ var LOG_LEVELS = struct {
 
 func (e ENV) Validate() {
 	switch e {
-	case ENVS.DEV, ENVS.PROD:
+	case ENVS.LOCAL, ENVS.DEV, ENVS.HOTFIX, ENVS.PROD:
 		return
 	default:
 		panic(errorsWrapper.New(fmt.Sprintf("invalid ENV variable value: %s", e)))
