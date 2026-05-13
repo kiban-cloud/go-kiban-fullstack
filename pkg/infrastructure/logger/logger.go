@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -27,16 +28,47 @@ var (
 	tenantIDExtractor    func(ctx context.Context) string
 )
 
+// sensitiveFormFields are redacted from request bodies even in non-prod.
+// Add fields as needed for your domain.
+var sensitiveFormFields = map[string]bool{
+	"password":         true,
+	"password_confirm": true,
+	"current_password": true,
+	"new_password":     true,
+	"card_number":      true,
+	"card":             true,
+	"cvv":              true,
+	"cvc":              true,
+	"ssn":              true,
+	"token":            true,
+	"api_key":          true,
+	"apikey":           true,
+	"secret":           true,
+	"authorization":    true,
+}
+
+// htmlResponseBodyMaxPreview caps the HTML preview logged on errors.
+// Full HTML bodies on every 4xx/5xx would balloon Cloud Logging costs.
+const htmlResponseBodyMaxPreview = 500
+
 type InitOpts struct {
 	LogLevel             commons.LOG_LEVEL
 	Env                  commons.ENV
 	IsCloudRun           bool
 	ModuleName           string
 	GoogleCloudProjectID string
-	// TenantIDExtractor, if non-nil, is invoked by FromContext to add a
-	// tenant_id slog attribute. Lets projects wire tenant enrichment without
-	// coupling the shared logger to their Tenant type.
-	TenantIDExtractor func(ctx context.Context) string
+	TenantIDExtractor    func(ctx context.Context) string
+}
+
+// HTMXContext captures the HTMX-specific request headers for structured logging.
+// Use slog.Group("htmx", ...) to emit these as a nested object in Cloud Logging.
+type HTMXContext struct {
+	IsHTMX      bool
+	IsBoosted   bool
+	Trigger     string
+	TriggerName string
+	Target      string
+	CurrentURL  string
 }
 
 type RequestErrorInfo struct {
@@ -50,6 +82,8 @@ type RequestErrorInfo struct {
 	RequestBody  string
 	ResponseBody string
 	Headers      map[string][]string
+	ContentType  string
+	HTMXContext  *HTMXContext
 	Error        error
 }
 
@@ -87,12 +121,8 @@ func Init(opts InitOpts) {
 		})
 	}
 
-	interceptor := &MyInterceptor{
-		next: handler,
-	}
-
+	interceptor := &MyInterceptor{next: handler}
 	logger := slog.New(interceptor)
-
 	slog.SetDefault(logger)
 
 	slog.Info("Logger initialized",
@@ -122,9 +152,6 @@ func parseLogLevel(lvl commons.LOG_LEVEL, isCloudRun bool) slog.Level {
 	}
 }
 
-// FromContext returns a logger enriched with request_id and trace from ctx.
-// Projects that want to add tenant_id or other fields should call
-// FromContext(ctx).With(slog.String("tenant_id", ...)) themselves.
 func FromContext(ctx context.Context) *slog.Logger {
 	attrs := []any{}
 	if requestID, ok := ctx.Value(infrastructure_common.REQUEST_ID).(string); ok {
@@ -132,7 +159,10 @@ func FromContext(ctx context.Context) *slog.Logger {
 	}
 
 	if trace, ok := ctx.Value(infrastructure_common.TRACE_KEY).(string); ok && trace != "" {
-		attrs = append(attrs, slog.String("logging.googleapis.com/trace", trace), slog.Bool("logging.googleapis.com/trace_sampled", true))
+		attrs = append(attrs,
+			slog.String("logging.googleapis.com/trace", trace),
+			slog.Bool("logging.googleapis.com/trace_sampled", true),
+		)
 	}
 
 	if tenantIDExtractor != nil {
@@ -142,6 +172,112 @@ func FromContext(ctx context.Context) *slog.Logger {
 	}
 
 	return slog.Default().With(attrs...)
+}
+
+// IsHTMLContentType returns true if the content type indicates an HTML response.
+func IsHTMLContentType(contentType string) bool {
+	return strings.HasPrefix(contentType, "text/html")
+}
+
+// IsJSONContentType returns true if the content type indicates a JSON request/response.
+func IsJSONContentType(contentType string) bool {
+	return strings.HasPrefix(contentType, "application/json")
+}
+
+// IsFormURLEncodedContentType returns true for traditional form submissions.
+func IsFormURLEncodedContentType(contentType string) bool {
+	return strings.HasPrefix(contentType, "application/x-www-form-urlencoded")
+}
+
+// IsMultipartContentType returns true for multipart form data (file uploads).
+func IsMultipartContentType(contentType string) bool {
+	return strings.HasPrefix(contentType, "multipart/form-data")
+}
+
+// redactFormValues redacts sensitive keys from parsed form values.
+func redactFormValues(values url.Values) map[string][]string {
+	redacted := make(map[string][]string, len(values))
+	for k, v := range values {
+		if sensitiveFormFields[strings.ToLower(k)] {
+			redacted[k] = []string{"[REDACTED]"}
+		} else {
+			redacted[k] = v
+		}
+	}
+	return redacted
+}
+
+// redactJSONObject redacts sensitive keys from a parsed JSON object map.
+func redactJSONObject(m map[string]any) map[string]any {
+	redacted := make(map[string]any, len(m))
+	for k, v := range m {
+		if sensitiveFormFields[strings.ToLower(k)] {
+			redacted[k] = "[REDACTED]"
+		} else {
+			redacted[k] = v
+		}
+	}
+	return redacted
+}
+
+// appendRequestBodyAttrs adds the request body to attrs, formatted/redacted
+// according to its Content-Type. Multipart is never logged.
+func appendRequestBodyAttrs(attrs []slog.Attr, contentType, body string) []slog.Attr {
+	if body == "" {
+		return attrs
+	}
+
+	switch {
+	case IsJSONContentType(contentType):
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(body), &parsed); err == nil {
+			return append(attrs, slog.Any("request_body", redactJSONObject(parsed)))
+		}
+		// Fallback if it's a JSON array or scalar that doesn't unmarshal to map
+		return append(attrs, slog.String("request_body", body))
+
+	case IsFormURLEncodedContentType(contentType):
+		if values, err := url.ParseQuery(body); err == nil {
+			return append(attrs, slog.Any("request_body", redactFormValues(values)))
+		}
+		return append(attrs, slog.String("request_body", body))
+
+	case IsMultipartContentType(contentType):
+		// Never log multipart bodies — they contain binary data and possibly files
+		return append(attrs,
+			slog.String("request_body_type", "multipart/form-data"),
+			slog.Int("request_body_size", len(body)),
+		)
+
+	default:
+		return append(attrs, slog.String("request_body", body))
+	}
+}
+
+// appendResponseBodyAttrs adds the response body to attrs.
+// HTML responses are truncated since they can be very large.
+// JSON responses are logged in full as raw JSON.
+func appendResponseBodyAttrs(attrs []slog.Attr, contentType, body string) []slog.Attr {
+	if body == "" {
+		return attrs
+	}
+
+	if IsHTMLContentType(contentType) {
+		preview := body
+		if len(preview) > htmlResponseBodyMaxPreview {
+			preview = preview[:htmlResponseBodyMaxPreview] + "...[truncated]"
+		}
+		return append(attrs,
+			slog.String("response_body_preview", preview),
+			slog.Int("response_body_size", len(body)),
+		)
+	}
+
+	if IsJSONContentType(contentType) {
+		return append(attrs, slog.Any("response_body", json.RawMessage(body)))
+	}
+
+	return append(attrs, slog.String("response_body", body))
 }
 
 func LogHTTPError(c *gin.Context, ctx context.Context, errCtx RequestErrorInfo, isPanic bool) {
@@ -168,34 +304,40 @@ func LogHTTPError(c *gin.Context, ctx context.Context, errCtx RequestErrorInfo, 
 		slog.Int("status_code", errCtx.StatusCode),
 	}
 
-	stackTrace := ExtractStackTrace(errorWrapped)
-
 	if errCtx.Query != "" {
 		attrs = append(attrs, slog.String("query", errCtx.Query))
 	}
 
-	if isRunningInCloudRun && env != commons.ENVS.PROD && errCtx.RequestBody != "" {
-		if strings.HasPrefix(c.GetHeader("Content-Type"), "application/json") {
-			var requestBody map[string]any
-			if err := json.Unmarshal([]byte(errCtx.RequestBody), &requestBody); err != nil {
-				attrs = append(attrs, slog.String("request_body", errCtx.RequestBody))
-			} else {
-				attrs = append(attrs, slog.Any("request_body", requestBody))
-			}
-		} else {
-			attrs = append(attrs, slog.String("request_body", errCtx.RequestBody))
+	// HTMX context (only emitted for HTMX requests)
+	if errCtx.HTMXContext != nil && errCtx.HTMXContext.IsHTMX {
+		attrs = append(attrs, slog.Group("htmx",
+			slog.Bool("is_htmx", errCtx.HTMXContext.IsHTMX),
+			slog.Bool("is_boosted", errCtx.HTMXContext.IsBoosted),
+			slog.String("trigger", errCtx.HTMXContext.Trigger),
+			slog.String("trigger_name", errCtx.HTMXContext.TriggerName),
+			slog.String("target", errCtx.HTMXContext.Target),
+			slog.String("current_url", errCtx.HTMXContext.CurrentURL),
+		))
+	}
+
+	// Request/response bodies — only in non-prod to avoid PII leakage
+	requestContentType := ""
+	if errCtx.Headers != nil {
+		if cts, ok := errCtx.Headers["Content-Type"]; ok && len(cts) > 0 {
+			requestContentType = cts[0]
 		}
 	}
 
-	if isRunningInCloudRun && env != commons.ENVS.PROD && errCtx.ResponseBody != "" {
-		attrs = append(attrs, slog.Any("response_body", json.RawMessage(errCtx.ResponseBody)))
+	if isRunningInCloudRun && env != commons.ENVS.PROD {
+		attrs = appendRequestBodyAttrs(attrs, requestContentType, errCtx.RequestBody)
+		attrs = appendResponseBodyAttrs(attrs, errCtx.ContentType, errCtx.ResponseBody)
+	} else if !isRunningInCloudRun {
+		// Local dev: log everything for easier debugging
+		attrs = appendRequestBodyAttrs(attrs, requestContentType, errCtx.RequestBody)
+		attrs = appendResponseBodyAttrs(attrs, errCtx.ContentType, errCtx.ResponseBody)
 	}
 
-	if !isRunningInCloudRun && errCtx.RequestBody != "" {
-		attrs = append(attrs, slog.String("request_body", errCtx.RequestBody))
-	}
-
-	if stackTrace != "" {
+	if stackTrace := ExtractStackTrace(errorWrapped); stackTrace != "" {
 		attrs = append(attrs, slog.String("stack_trace", stackTrace))
 	}
 

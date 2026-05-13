@@ -238,3 +238,15 @@ Toda vista `.templ` debe tener un test que la renderice. Cuando crees una vista 
 4. Si tocaste algo bajo `tests/integration/`, documenta cómo correrlo en la respuesta.
 5. Si tocaste un usecase, `go test ./internal/usecases/<feature>/<action>/...` verde y el checklist de unit tests aplicado.
 6. **Si arreglaste un bug**: hay test de regresión nuevo o actualizado, y verificaste que falla sin el fix y pasa con el fix (ver [Tests de regresión para bugs](#tests-de-regresión-para-bugs)). Reportalo explícitamente en la respuesta.
+
+## HTMX Error Handling
+
+Los handlers HTMX en proyectos que consumen este módulo siguen un patrón
+estricto de manejo de errores documentado en `docs/HTMX_ERROR_HANDLING.md`.
+
+El módulo provee:
+- `pkg/infrastructure/http/middleware/logger.go` — captura headers HTMX
+- `pkg/infrastructure/http/errors/htmx.go` — helper `RespondHTMX`
+- `pkg/ui/components/errors.templ` — fragments de error reutilizables
+
+Al implementar handlers HTMX, leer ese documento primero.
