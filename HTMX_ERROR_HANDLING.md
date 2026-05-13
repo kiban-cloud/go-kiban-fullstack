@@ -195,102 +195,106 @@ El JS solo limpia dentro del form o swap target. Avisos de **estado persistente*
 
 ## Setup del servidor
 
-### Helper httperrors.RespondHTMX
+### Arquitectura: lo común vive en go-kiban-fullstack, lo específico en cada proyecto
 
-Este helper centraliza el mapping de errores de dominio a status + fragment. Si no existe aún en `go-kiban-fullstack`, créalo en `pkg/infrastructure/http/errors/htmx.go`:
+El mapping de errores está partido en dos:
+
+| Capa | Ubicación | Contenido |
+|---|---|---|
+| **Compartido** | `go-kiban-fullstack/pkg/domain/errors/canonical.go` | 8 sentinels HTTP-genéricos: `ErrInvalidInput`, `ErrValidation`, `ErrNotFound`, `ErrUnauthorized`, `ErrForbidden`, `ErrAlreadyExists`, `ErrConflict`, `ErrExternalServiceUnavailable` |
+| **Compartido** | `go-kiban-fullstack/pkg/infrastructure/http/htmx/respond.go` | El helper genérico: tabla de mapping, opciones (`WithFormFallback`), `TagError`, `StatusForError`, integración con `ERROR_MESSAGE_CONTEXT_KEY` |
+| **Por proyecto** | `internal/domain/errors/` | Sentinels específicos del negocio (ej. `ErrRateLimited`, `ErrRenapoUnavailable`, `ErrInsufficientTokens`) + re-export de los canónicos para que los usecases tengan un único import |
+| **Por proyecto** | `internal/infrastructure/http/httperrors/` | Wrapper que inyecta la paleta de componentes templ del proyecto + el `ProjectMapper` para sus errores propios |
+
+El paquete compartido **no depende de `a-h/templ`** — usa una interfaz `Renderable` con la misma firma que `templ.Component`, así el lib se mantiene independiente del view system. Los componentes templ del proyecto satisfacen la interfaz estructuralmente.
+
+### Cableado en el proyecto
+
+Cada proyecto crea un wrapper delgado que ata el helper compartido a sus componentes templ:
 
 ```go
-package errors
+// internal/infrastructure/http/httperrors/htmx.go
+package httperrors
 
 import (
     "errors"
+    "log/slog"
     "net/http"
 
-    domain_errors "github.com/kiban-cloud/go-kiban-fullstack/pkg/domain/errors"
-    "github.com/kiban-cloud/go-kiban-fullstack/pkg/infrastructure/logger"
-    "github.com/kiban-cloud/go-kiban-fullstack/pkg/ui/components"
+    domain_errors "miproyecto/internal/domain/errors"
+    common_view "miproyecto/internal/view/common"
 
     "github.com/a-h/templ"
     "github.com/gin-gonic/gin"
+    "github.com/kiban-cloud/go-kiban-fullstack/pkg/infrastructure/http/htmx"
 )
 
-// RespondHTMX maps a domain error to the appropriate HTTP status + HTML fragment.
-// The caller is responsible for passing the original error from the use case.
-//
-// Usage in handlers:
-//
-//   result, err := h.usecase.Validate(ctx, input)
-//   if err != nil {
-//       httperrors.RespondHTMX(c, err)
-//       return
-//   }
-//   c.HTML(http.StatusOK, components.CurpResult(result))
-func RespondHTMX(c *gin.Context, err error) {
-    status, component := mapErrorToResponse(err)
+type Option = htmx.Option
 
-    // Stash the error in context so the logger middleware picks it up
-    c.Set(ERROR_MESSAGE_CONTEXT_KEY, err)
+func WithFormFallback(form templ.Component) Option {
+    return htmx.WithFormFallback(form) // templ.Component → htmx.Renderable (structural)
+}
 
+var config = htmx.Config{
+    Fragments: htmx.CanonicalFragments{
+        Validation:   func(msg string) htmx.Renderable { return common_view.ValidationError(msg) },
+        NotFound:     func(msg string) htmx.Renderable { return common_view.NotFoundError(msg) },
+        Unauthorized: func() htmx.Renderable { return common_view.UnauthorizedError() },
+        Forbidden:    func() htmx.Renderable { return common_view.ForbiddenError() },
+        Banner:       func(msg string) htmx.Renderable { return common_view.ErrorBanner(msg) },
+    },
+    ProjectMapper: projectMap,
+    Render:        render,
+}
+
+// projectMap captura errores específicos del proyecto. Devuelve (0, nil)
+// para caer en el banner 500 default del paquete compartido.
+func projectMap(err error) (int, htmx.Renderable) {
+    switch {
+    case errors.Is(err, domain_errors.ErrRateLimited):
+        return http.StatusTooManyRequests, common_view.ErrorBanner("Demasiados intentos. Espera unos segundos.")
+    case errors.Is(err, domain_errors.ErrRenapoUnavailable):
+        return http.StatusBadGateway, common_view.ErrorBanner("RENAPO no disponible. Intenta de nuevo en unos momentos.")
+    }
+    return 0, nil
+}
+
+func render(c *gin.Context, status int, comp htmx.Renderable) {
     c.Status(status)
     c.Header("Content-Type", "text/html; charset=utf-8")
-
-    if renderErr := component.Render(c.Request.Context(), c.Writer); renderErr != nil {
-        logger.FromContext(c.Request.Context()).Error(
-            "failed to render error fragment",
-            "error", renderErr,
-            "original_error", err,
-        )
+    if err := comp.Render(c.Request.Context(), c.Writer); err != nil {
+        slog.Error("templ render error", "error", err)
     }
 }
 
-func mapErrorToResponse(err error) (int, templ.Component) {
-    switch {
-    // Validation errors → 422
-    case errors.Is(err, domain_errors.ErrInvalidInput),
-        errors.Is(err, domain_errors.ErrValidation):
-        return http.StatusUnprocessableEntity,
-            components.ValidationError(err.Error())
-
-    // Not found → 404
-    case errors.Is(err, domain_errors.ErrNotFound):
-        return http.StatusNotFound,
-            components.NotFoundError(err.Error())
-
-    // Auth errors
-    case errors.Is(err, domain_errors.ErrUnauthorized):
-        return http.StatusUnauthorized,
-            components.UnauthorizedError()
-    case errors.Is(err, domain_errors.ErrForbidden):
-        return http.StatusForbidden,
-            components.ForbiddenError()
-
-    // Conflict (already exists, duplicate)
-    case errors.Is(err, domain_errors.ErrAlreadyExists),
-        errors.Is(err, domain_errors.ErrConflict):
-        return http.StatusConflict,
-            components.ValidationError(err.Error())
-
-    // External dependency down → 502
-    case errors.Is(err, domain_errors.ErrExternalServiceUnavailable),
-        errors.Is(err, domain_errors.ErrRenapoUnavailable),
-        errors.Is(err, domain_errors.ErrBancoUnavailable):
-        return http.StatusBadGateway,
-            components.ErrorBanner("Servicio externo no disponible. Intenta de nuevo en unos momentos.")
-
-    // Rate limit
-    case errors.Is(err, domain_errors.ErrRateLimited):
-        return http.StatusTooManyRequests,
-            components.ErrorBanner("Demasiados intentos. Espera unos segundos.")
-
-    // Default: unknown error → 500
-    default:
-        return http.StatusInternalServerError,
-            components.ErrorBanner("Ocurrió un error inesperado. El equipo ya fue notificado.")
-    }
-}
+func RespondHTMX(c *gin.Context, err error, opts ...Option) { config.RespondHTMX(c, err, opts...) }
+func TagError(c *gin.Context, err error)                    { config.TagError(c, err) }
+func StatusForError(err error) int                          { return config.StatusForError(err) }
 ```
 
-> **Nota:** Los errores de dominio referenciados (`ErrInvalidInput`, `ErrRenapoUnavailable`, etc.) deben existir en `pkg/domain/errors`. Si no existen, créalos siguiendo el patrón clean architecture del proyecto. Cada proyecto puede tener errores adicionales específicos de su dominio.
+### Errores canónicos vs proyecto: cómo decidir dónde van
+
+**Va a `go-kiban-fullstack` (canónico):** mapea 1:1 con un status HTTP genérico que tiene sentido en cualquier servicio web (404 = recurso no existe, 422 = input inválido, 401 = sin sesión, etc.). No carga semántica de un dominio particular.
+
+**Queda en el proyecto:** mapea a una situación de negocio específica.
+- Dependencias externas con nombre propio (`ErrRenapoUnavailable`, `ErrStripeUnavailable`) → 502 con copy específico
+- Estados de negocio propios (`ErrInsufficientTokens` → 402, `ErrRateLimited` cuando se aplica solo a tu producto) → status específico
+- Errores con copy que solo tiene sentido en ese servicio
+
+Cuando dudes, **empezá local y subí a canónico solo cuando un segundo proyecto lo necesite** — es más fácil promocionar que sacar.
+
+### Sentinels de usecase: wrap canónico al declarar
+
+Los sentinels específicos de cada usecase envuelven un canónico vía `fmt.Errorf("%w: ...")` para que `errors.Is` los matchee sin que el helper genérico tenga que conocerlos:
+
+```go
+// internal/usecases/auth/login/errors.go
+var ErrEmailOrPasswordInvalid = fmt.Errorf("%w: email o contraseña incorrectos", domain_errors.ErrUnauthorized)
+```
+
+Esto preserva la API pública (`errors.Is(err, login.ErrEmailOrPasswordInvalid)` sigue funcionando) y al mismo tiempo deja que el mapper compartido lo resuelva como 401.
+
+**Usar `fmt.Errorf("%w: ...")`, no `errorsWrapper.Wrap` (`pkg/errors`)** — `Wrap` guarda la causa pero `errors.Is` de stdlib no recorre cadenas de `pkg/errors` para sentinels. Si necesitás stack trace además del wrap canónico, usá `errorsWrapper.Wrap(canonical, "msg")` (Wrap sí implementa `Unwrap()` desde v0.9.0).
 
 ### Verificar que el logger middleware ya está aplicado
 

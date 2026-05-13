@@ -239,14 +239,63 @@ Toda vista `.templ` debe tener un test que la renderice. Cuando crees una vista 
 5. Si tocaste un usecase, `go test ./internal/usecases/<feature>/<action>/...` verde y el checklist de unit tests aplicado.
 6. **Si arreglaste un bug**: hay test de regresión nuevo o actualizado, y verificaste que falla sin el fix y pasa con el fix (ver [Tests de regresión para bugs](#tests-de-regresión-para-bugs)). Reportalo explícitamente en la respuesta.
 
+## Minimizar código en proyectos consumidores
+
+**Regla:** `go-kiban-fullstack` es la base de todos los proyectos Kiban. Cualquier código que **no cambie entre proyectos** vive acá. Los proyectos solo declaran lo que es genuinamente propio de su negocio: identidad visual (templ), errores específicos de su dominio, wiring, y nada más.
+
+**Aplicar cuando:**
+- Estás por escribir un wrapper de una sola línea que delega a un símbolo del shared lib. No lo hagas — exponé el símbolo del shared lib directamente o agregá un wrapper de paquete-nivel acá.
+- Estás por copiar la misma función entre proyectos. Subila al shared.
+- Estás por declarar el mismo error sentinel en dos proyectos. Subilo a `pkg/domain/errors/canonical.go`.
+
+**Patrón "Default + package-level wrappers" para singletons con wiring per-project:**
+
+Cuando un helper necesita configuración por proyecto (componentes de view, mappers específicos, etc.) pero la API que ven los handlers es siempre la misma, usar este patrón:
+
+```go
+// shared lib
+package htmx
+
+// Default holds the project-specific wiring set at boot.
+var Default Config
+
+// Top-level wrappers delegate to Default — call sites use these directly.
+func RespondHTMX(c *gin.Context, err error, opts ...Option) {
+    Default.RespondHTMX(c, err, opts...)
+}
+```
+
+```go
+// proyecto: internal/infrastructure/http/httperrors/htmx.go
+package httperrors
+
+func init() {
+    htmx.Default = htmx.Config{
+        Fragments:     /* templ del proyecto */,
+        ProjectMapper: projectMap, // errores específicos del proyecto
+        Render:        htmx.DefaultRender,
+    }
+}
+```
+
+```go
+// cmd/api/app.go — import por side-effect para que init() corra
+_ "miproyecto/internal/infrastructure/http/httperrors"
+```
+
+Los call sites usan `htmx.RespondHTMX(c, err)` directamente. **No** se crea un wrapper local de una línea en el proyecto. **No** se duplica la firma. La única superficie del proyecto en `httperrors` es: `init()` que setea `htmx.Default` + `projectMap` con sus errores propios.
+
+**Pista de revisión:** si un archivo del proyecto es 100% wrappers de una línea sobre el shared lib, está mal — borralo y movelo al shared.
+
 ## HTMX Error Handling
 
-Los handlers HTMX en proyectos que consumen este módulo siguen un patrón
-estricto de manejo de errores documentado en `docs/HTMX_ERROR_HANDLING.md`.
+Los handlers HTMX en proyectos que consumen este módulo siguen el patrón
+documentado en `HTMX_ERROR_HANDLING.md`.
 
 El módulo provee:
-- `pkg/infrastructure/http/middleware/logger.go` — captura headers HTMX
-- `pkg/infrastructure/http/errors/htmx.go` — helper `RespondHTMX`
-- `pkg/ui/components/errors.templ` — fragments de error reutilizables
+- `pkg/domain/errors/canonical.go` — 8 sentinels canónicos (`ErrInvalidInput`, `ErrValidation`, `ErrNotFound`, `ErrUnauthorized`, `ErrForbidden`, `ErrAlreadyExists`, `ErrConflict`, `ErrExternalServiceUnavailable`). Los proyectos importan estos directamente desde `pkg/domain/errors/` — **no se re-exportan** en el `internal/domain/errors/` del proyecto.
+- `pkg/infrastructure/http/htmx/respond.go` — `Config`, `Default`, `RespondHTMX`, `TagError`, `StatusForError`, `WithFormFallback`, `DefaultRender`, `Renderable`. Es la API completa; los proyectos no envuelven.
+- `pkg/infrastructure/http/htmx/htmxtest/` — helpers de test (`NewCtx`, `Render`, `Marker`) reutilizables.
+- `pkg/infrastructure/http/middleware/logger.go` — captura headers HTMX y lee `ERROR_MESSAGE_CONTEXT_KEY` para registrar el error real aunque el status sea 200.
 
-Al implementar handlers HTMX, leer ese documento primero.
+Al implementar handlers HTMX, leer `HTMX_ERROR_HANDLING.md` primero.
