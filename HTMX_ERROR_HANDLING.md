@@ -126,6 +126,71 @@ Cada formulario o elemento que dispare requests HTMX debe especificar qué hacer
 
 El banner está oculto por default y HTMX lo llena cuando hay un 5xx.
 
+### Limpiar feedback stale antes de cada request (regla obligatoria)
+
+> **Regla:** Cuando se dispara un HTMX request, **todo feedback inline previo de ese contexto debe desaparecer antes de que llegue la respuesta nueva.**
+
+**¿Por qué existe esta regla?**
+
+Por default HTMX no limpia nada. Esto crea un bug sutil:
+
+1. El usuario submitea el form → 409 → `hx-target-4xx="this"` swappea el form → aparece "Este correo ya está registrado." inline.
+2. El usuario corrige y submitea de nuevo → 500 → `hx-target-5xx="#global-error-banner"` mete `ErrorBanner` en el banner global, **pero el form no se swappea** porque su `hx-target-4xx` no aplica al 5xx.
+3. Resultado: el banner muestra "Ocurrió un error inesperado" mientras el form sigue mostrando "Este correo ya está registrado." Los dos errores son contradictorios.
+
+Mismo problema con success messages stale ("Código reenviado" persistiendo después de un nuevo intento fallido).
+
+**Implementación**
+
+Agregar un listener global de `htmx:beforeRequest` en `head.templ` (o equivalente del layout base):
+
+```html
+<script>
+    document.addEventListener('htmx:beforeRequest', function(evt) {
+        // 1. Limpiar el banner global (donde caen los 5xx).
+        var banner = document.getElementById('global-error-banner');
+        if (banner) banner.innerHTML = '';
+
+        // 2. Limpiar feedback inline dentro del form que dispara la request
+        //    y dentro del swap target. Cubre ambos casos:
+        //      - feedback dentro del form (login/register/profile)
+        //      - feedback sibling del form, dentro de un wrapper (verify,
+        //        donde el error vive dentro de #verifySection junto al form)
+        var detail = evt.detail || {};
+        [detail.elt, detail.target].forEach(function(el) {
+            if (!el) return;
+            var scope = el.tagName === 'FORM' ? el : (el.closest('form') || el);
+            scope.querySelectorAll('[data-error-type],[data-success-type]').forEach(function(node) {
+                node.remove();
+            });
+        });
+    });
+</script>
+```
+
+**Marcar los elementos clearables en los templates**
+
+Cada div inline de error o success debe llevar el atributo de marcado correspondiente:
+
+```templ
+if form.Error != "" {
+    <div role="alert" data-error-type="form-error" class="...">{ form.Error }</div>
+}
+if form.Success != "" {
+    <div role="status" data-success-type="form-success" class="...">{ form.Success }</div>
+}
+```
+
+Los componentes canónicos de `httperrors.RespondHTMX` (`ErrorBanner`, `ValidationError`, etc.) ya traen `data-error-type` por construcción. Solo necesitás agregar el marker a los divs hand-rolled que viven dentro de forms o secciones.
+
+**¿Por qué dos atributos en vez de uno?**
+
+`data-error-type` y `data-success-type` separan semánticamente errores de confirmaciones. Permite, por ejemplo, mantener un mensaje de éxito visible más tiempo (animación, toast) si querés cambiar la política — solo ajustás el selector del JS.
+
+**Limitaciones / cuándo NO clearar**
+
+El JS solo limpia dentro del form o swap target. Avisos de **estado persistente** (cuenta no verificada, pago vencido, enlace de reset expirado) que vivan en otros lugares de la página y no son consecuencia de un submit NO llevan el marker — siguen visibles hasta que el server los retire en el próximo render completo.
+
 ---
 
 ## Setup del servidor
@@ -459,6 +524,8 @@ Cuando aplicas este patrón a un handler existente:
 - [ ] El handler no tiene `c.HTML(200, errorFragment)` — todos los caminos de error pasan por `httperrors.RespondHTMX`
 - [ ] El template del form en el cliente tiene `hx-target-4xx` y `hx-target-5xx`
 - [ ] El layout base incluye `hx-ext="response-targets"` y el `<div id="global-error-banner">`
+- [ ] El layout base monta el listener de `htmx:beforeRequest` que limpia banner + `[data-error-type]`/`[data-success-type]`
+- [ ] Los divs inline de error y success del template llevan `data-error-type="form-error"` / `data-success-type="form-success"` (sin esto, un 5xx que sigue a un 4xx deja el error inline previo stale)
 - [ ] Los errores específicos del proyecto están mapeados en `mapErrorToResponse`
 - [ ] Probaste manualmente al menos un camino de error y verificaste que:
   - El usuario ve el fragment correcto
@@ -480,6 +547,8 @@ Cuando aplicas este patrón a un handler existente:
 ❌ **Loguear el error en el handler antes de devolver** — el middleware ya lo hace, evitar duplicación
 
 ❌ **Olvidar el `hx-target-5xx`** — el usuario ve "nada" cuando el sistema falla
+
+❌ **No limpiar feedback stale entre submits** — un 4xx deja un error inline en el form; el siguiente 5xx mete un banner en `#global-error-banner` pero NO retoca el form, así que el usuario ve ambos errores (contradictorios) al mismo tiempo. El listener de `htmx:beforeRequest` en el layout es obligatorio y los divs inline necesitan `data-error-type` / `data-success-type` para que el listener los encuentre.
 
 ---
 
