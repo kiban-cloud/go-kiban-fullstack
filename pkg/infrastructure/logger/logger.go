@@ -429,6 +429,21 @@ func printLocalAttrs(attrs []slog.Attr) {
 		case "request_body":
 			fmt.Printf("  \033[34mrequest_body:\033[0m %s\n", slogValueAsPrintableString(attr.Value))
 		default:
+			// []byte / json.RawMessage values (e.g. response_body for JSON
+			// responses, see appendResponseBodyAttrs) are stored as
+			// slog.KindAny. The default `%v` formatter prints them as a
+			// slice of integers (`[123 34 ...]`) which is unreadable. Show
+			// them as the underlying string instead.
+			if attr.Value.Kind() == slog.KindAny {
+				switch v := attr.Value.Any().(type) {
+				case json.RawMessage:
+					fmt.Printf("  \033[34m%s:\033[0m %s\n", attr.Key, string(v))
+					continue
+				case []byte:
+					fmt.Printf("  \033[34m%s:\033[0m %s\n", attr.Key, string(v))
+					continue
+				}
+			}
 			fmt.Printf("  \033[34m%s:\033[0m %v\n", attr.Key, attr.Value)
 		}
 	}
