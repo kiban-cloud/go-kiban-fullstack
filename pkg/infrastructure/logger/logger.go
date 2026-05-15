@@ -71,7 +71,7 @@ type HTMXContext struct {
 	CurrentURL  string
 }
 
-type RequestErrorInfo struct {
+type RequestInfo struct {
 	Method       string
 	Path         string
 	Query        string
@@ -222,6 +222,13 @@ func redactJSONObject(m map[string]any) map[string]any {
 
 // appendRequestBodyAttrs adds the request body to attrs, formatted/redacted
 // according to its Content-Type. Multipart is never logged.
+//
+// JSON bodies are passed as json.RawMessage so that both Cloud Logging
+// (structured nested object) and local dev (readable JSON text via
+// printLocalAttrs) render them identically to response_body. The previous
+// version passed a map[string]any which printed as `map[k:v ...]` in local
+// dev — readable, but inconsistent with response_body and harder to copy
+// back into Postman / curl.
 func appendRequestBodyAttrs(attrs []slog.Attr, contentType, body string) []slog.Attr {
 	if body == "" {
 		return attrs
@@ -229,11 +236,23 @@ func appendRequestBodyAttrs(attrs []slog.Attr, contentType, body string) []slog.
 
 	switch {
 	case IsJSONContentType(contentType):
-		var parsed map[string]any
-		if err := json.Unmarshal([]byte(body), &parsed); err == nil {
-			return append(attrs, slog.Any("request_body", redactJSONObject(parsed)))
+		// Object: parse, redact, re-marshal so secrets are stripped.
+		var parsedObj map[string]any
+		if err := json.Unmarshal([]byte(body), &parsedObj); err == nil {
+			if reMarshaled, mErr := json.Marshal(redactJSONObject(parsedObj)); mErr == nil {
+				return append(attrs, slog.Any("request_body", json.RawMessage(reMarshaled)))
+			}
 		}
-		// Fallback if it's a JSON array or scalar that doesn't unmarshal to map
+		// Array / scalar / nested: emit the original bytes verbatim if they
+		// parse as valid JSON. No redaction at this layer — sensitive fields
+		// inside arrays of objects would leak; if that ever becomes a real
+		// case, walk the value with redactJSONValue.
+		var parsedAny any
+		if err := json.Unmarshal([]byte(body), &parsedAny); err == nil {
+			return append(attrs, slog.Any("request_body", json.RawMessage(body)))
+		}
+		// Malformed JSON despite the Content-Type header — fall back to a
+		// raw string so the log entry stays valid JSON in Cloud Logging.
 		return append(attrs, slog.String("request_body", body))
 
 	case IsFormURLEncodedContentType(contentType):
@@ -280,18 +299,19 @@ func appendResponseBodyAttrs(attrs []slog.Attr, contentType, body string) []slog
 	return append(attrs, slog.String("response_body", body))
 }
 
-func LogHTTPError(c *gin.Context, ctx context.Context, errCtx RequestErrorInfo, isPanic bool) {
+func LogHttpInfo(c *gin.Context, ctx context.Context, errCtx RequestInfo, isPanic bool) {
+
+	if isRunningInCloudRun && env == commons.ENVS.PROD && errCtx.StatusCode < 400 {
+		return
+	}
+
 	logger := FromContext(ctx)
 
 	var errorWrapped error
 	if errCtx.Error != nil {
 		errorWrapped = errCtx.Error
-	} else {
-		if isPanic {
-			errorWrapped = fmt.Errorf("panic recovered")
-		} else {
-			errorWrapped = fmt.Errorf("HTTP error")
-		}
+	} else if isPanic {
+		errorWrapped = fmt.Errorf("panic recovered")
 	}
 
 	attrs := []slog.Attr{
@@ -337,8 +357,11 @@ func LogHTTPError(c *gin.Context, ctx context.Context, errCtx RequestErrorInfo, 
 		attrs = appendResponseBodyAttrs(attrs, errCtx.ContentType, errCtx.ResponseBody)
 	}
 
-	if stackTrace := ExtractStackTrace(errorWrapped); stackTrace != "" {
-		attrs = append(attrs, slog.String("stack_trace", stackTrace))
+	if errorWrapped != nil {
+		stackTrace := ExtractStackTrace(errorWrapped)
+		if stackTrace != "" {
+			attrs = append(attrs, slog.String("stack_trace", stackTrace))
+		}
 	}
 
 	logger.LogAttrs(ctx, slog.LevelError, errorWrapped.Error(), attrs...)
@@ -426,26 +449,22 @@ func printLocalAttrs(attrs []slog.Attr) {
 			if st != "" {
 				fmt.Printf("\n\033[31mSTACK TRACE:\033[0m\n%s\n", st)
 			}
-		case "request_body":
-			fmt.Printf("  \033[34mrequest_body:\033[0m %s\n", slogValueAsPrintableString(attr.Value))
-		default:
-			// []byte / json.RawMessage values (e.g. response_body for JSON
-			// responses, see appendResponseBodyAttrs) are stored as
-			// slog.KindAny. The default `%v` formatter prints them as a
-			// slice of integers (`[123 34 ...]`) which is unreadable. Show
-			// them as the underlying string instead.
-			if attr.Value.Kind() == slog.KindAny {
-				switch v := attr.Value.Any().(type) {
-				case json.RawMessage:
-					fmt.Printf("  \033[34m%s:\033[0m %s\n", attr.Key, string(v))
-					continue
-				case []byte:
-					fmt.Printf("  \033[34m%s:\033[0m %s\n", attr.Key, string(v))
-					continue
-				}
-			}
-			fmt.Printf("  \033[34m%s:\033[0m %v\n", attr.Key, attr.Value)
+			continue
 		}
+
+		// json.RawMessage / []byte values (request_body & response_body for
+		// JSON content, see appendRequestBodyAttrs / appendResponseBodyAttrs)
+		// are stored as slog.KindAny. The default `%v` formatter prints
+		// them as a slice of integers (`[123 34 ...]`) which is unreadable.
+		// slogValueAsPrintableString unwraps them to their underlying string.
+		if attr.Value.Kind() == slog.KindAny {
+			switch attr.Value.Any().(type) {
+			case json.RawMessage, []byte:
+				fmt.Printf("  \033[34m%s:\033[0m %s\n", attr.Key, slogValueAsPrintableString(attr.Value))
+				continue
+			}
+		}
+		fmt.Printf("  \033[34m%s:\033[0m %v\n", attr.Key, attr.Value)
 	}
 }
 
@@ -466,10 +485,19 @@ func slogValueAsPrintableString(v slog.Value) string {
 	case slog.KindDuration:
 		return v.Duration().String()
 	case slog.KindAny:
-		if s, ok := v.Any().(string); ok {
-			return s
+		switch raw := v.Any().(type) {
+		case string:
+			return raw
+		case json.RawMessage:
+			// JSON bodies pass through as RawMessage so Cloud Logging emits
+			// them as nested JSON. In local dev we want them as readable
+			// text, not `[123 34 ...]`.
+			return string(raw)
+		case []byte:
+			return string(raw)
+		default:
+			return fmt.Sprint(raw)
 		}
-		return fmt.Sprint(v.Any())
 	default:
 		return v.String()
 	}

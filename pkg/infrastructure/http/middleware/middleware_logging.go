@@ -150,7 +150,7 @@ func (m *LoggerMiddleware) Middleware() gin.HandlerFunc {
 			if err := recover(); err != nil {
 				responseContentType := ctx.Writer.Header().Get("Content-Type")
 
-				errCtx := logger.RequestErrorInfo{
+				errCtx := logger.RequestInfo{
 					Method:      ctx.Request.Method,
 					Path:        ctx.Request.URL.Path,
 					Query:       ctx.Request.URL.RawQuery,
@@ -170,7 +170,7 @@ func (m *LoggerMiddleware) Middleware() gin.HandlerFunc {
 					errCtx.Error = fmt.Errorf("panic: %v", err)
 				}
 
-				logger.LogHTTPError(ctx, ctx.Request.Context(), errCtx, true)
+				logger.LogHttpInfo(ctx, ctx.Request.Context(), errCtx, true)
 				ctx.Set(alreadyLoggedKey, true)
 
 				if !ctx.Writer.Written() {
@@ -211,27 +211,23 @@ func (m *LoggerMiddleware) Middleware() gin.HandlerFunc {
 			errorInContextError = errorInContext.(error)
 		}
 
-		if statusCode >= 400 || errorInContextError != nil {
-			responseContentType := ctx.Writer.Header().Get("Content-Type")
-
-			errCtx := logger.RequestErrorInfo{
-				Method:       ctx.Request.Method,
-				Path:         ctx.Request.URL.Path,
-				Query:        ctx.Request.URL.RawQuery,
-				IP:           ctx.ClientIP(),
-				UserAgent:    ctx.Request.UserAgent(),
-				StatusCode:   statusCode,
-				Duration:     time.Since(start),
-				Headers:      ctx.Request.Header,
-				RequestBody:  string(requestBody),
-				ResponseBody: responseBody.String(),
-				ContentType:  responseContentType,
-				HTMXContext:  htmxCtx,
-				Error:        errorInContextError,
-			}
-
-			logger.LogHTTPError(ctx, ctx.Request.Context(), errCtx, false)
+		requestInfo := logger.RequestInfo{
+			Method:       ctx.Request.Method,
+			Path:         ctx.Request.URL.Path,
+			Query:        ctx.Request.URL.RawQuery,
+			IP:           ctx.ClientIP(),
+			UserAgent:    ctx.Request.UserAgent(),
+			StatusCode:   statusCode,
+			Duration:     time.Since(start),
+			Headers:      ctx.Request.Header,
+			RequestBody:  string(requestBody),
+			ResponseBody: responseBody.String(),
+			ContentType:  ctx.Writer.Header().Get("Content-Type"),
+			HTMXContext:  htmxCtx,
+			Error:        errorInContextError,
 		}
+
+		logger.LogHttpInfo(ctx, ctx.Request.Context(), requestInfo, false)
 	}
 }
 
