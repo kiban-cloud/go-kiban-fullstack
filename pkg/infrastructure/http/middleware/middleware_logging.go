@@ -205,11 +205,19 @@ func (m *LoggerMiddleware) Middleware() gin.HandlerFunc {
 		}
 
 		statusCode := ctx.Writer.Status()
-		errorInContext, ok := ctx.Get(http_errors.ERROR_MESSAGE_CONTEXT_KEY)
-		
+
+		// Safe type assertion: callers (htmx.TagError, RespondHTMX) set the
+		// key with their `err` parameter, which could be a nil interface or
+		// a non-error value if a caller misuses the API. A naked `.(error)`
+		// would panic, and that panic would be caught by the recover above
+		// — which logs it as a 500 even though the handler already wrote a
+		// 2xx. Use comma-ok so misuse becomes a silent no-op instead of a
+		// confusing fake 500 in the logs.
 		var errorInContextError error
-		if ok {
-			errorInContextError = errorInContext.(error)
+		if v, ok := ctx.Get(http_errors.ERROR_MESSAGE_CONTEXT_KEY); ok {
+			if e, isErr := v.(error); isErr {
+				errorInContextError = e
+			}
 		}
 
 		requestInfo := logger.RequestInfo{

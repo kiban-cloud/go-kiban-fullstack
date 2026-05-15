@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ansiEscape matches any CSI escape sequence (e.g. \x1b[34m). printLocalAttrs
@@ -191,3 +193,109 @@ func captureStdout(t *testing.T, fn func()) string {
 	_ = r.Close()
 	return buf.String()
 }
+
+// TestLogHttpInfo_NoNilDeref_OnSuccess is the regression test for the bug
+// reported as "Postman sees 200 but the log shows ERR runtime error: nil
+// pointer dereference / status 500". Root cause: when the handler returned
+// successfully and nothing tagged an error, errCtx.Error was nil and
+// isPanic was false, but the post-handler code unconditionally called
+// errorWrapped.Error() — panic on nil interface. The deferred recover then
+// emitted a confusing fake 500.
+//
+// This test calls LogHttpInfo with the exact shape of a successful 200
+// (no Error, no panic) and asserts:
+//   - no panic
+//   - the emitted log is at LevelInfo, not LevelError
+func TestLogHttpInfo_NoNilDeref_OnSuccess(t *testing.T) {
+	// Build a logger that writes JSON to a buffer so we can inspect the level.
+	var sink bytes.Buffer
+	handler := slog.NewJSONHandler(&sink, &slog.HandlerOptions{Level: slog.LevelDebug})
+	prev := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(prev)
+
+	// Simulate non-prod runtime so the early-return at the top of LogHttpInfo
+	// (`isRunningInCloudRun && PROD && status<400`) doesn't bypass the buggy
+	// code path.
+	isRunningInCloudRun = false
+	defer func() { isRunningInCloudRun = false }()
+
+	info := RequestInfo{
+		Method:       "POST",
+		Path:         "/api/v1/sepomex/codigo-postal",
+		IP:           "::1",
+		UserAgent:    "PostmanRuntime/7.54.0",
+		StatusCode:   200,
+		Duration:     150 * time.Millisecond,
+		Headers:      map[string][]string{"Content-Type": {"application/json"}},
+		RequestBody:  `{"codigoPostal":"06700"}`,
+		ResponseBody: `{"ok":true}`,
+		ContentType:  "application/json",
+		Error:        nil, // critical: no tagged error
+	}
+
+	// Must not panic.
+	LogHttpInfo(nil, context.Background(), info, false)
+
+	out := sink.String()
+	if !strings.Contains(out, `"level":"INFO"`) {
+		t.Errorf("expected a LevelInfo log for status 200, got:\n%s", out)
+	}
+	if strings.Contains(out, "nil pointer") || strings.Contains(out, "runtime error") {
+		t.Errorf("log should not contain panic markers, got:\n%s", out)
+	}
+	if strings.Contains(out, `"status_code":500`) {
+		t.Errorf("status_code should be 200, not a fake 500, got:\n%s", out)
+	}
+}
+
+// TestLogHttpInfo_LevelMapping covers the level-by-status policy so future
+// changes don't accidentally swap them.
+func TestLogHttpInfo_LevelMapping(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		err       error
+		isPanic   bool
+		wantLevel string
+	}{
+		{"200 no error → INFO", 200, nil, false, `"level":"INFO"`},
+		{"302 redirect → INFO", 302, nil, false, `"level":"INFO"`},
+		{"404 → WARN", 404, nil, false, `"level":"WARN"`},
+		{"500 → ERROR", 500, nil, false, `"level":"ERROR"`},
+		{"any status with tagged err → ERROR", 200, fmtErr("tagged"), false, `"level":"ERROR"`},
+		{"panic → ERROR", 500, nil, true, `"level":"ERROR"`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sink bytes.Buffer
+			handler := slog.NewJSONHandler(&sink, &slog.HandlerOptions{Level: slog.LevelDebug})
+			prev := slog.Default()
+			slog.SetDefault(slog.New(handler))
+			defer slog.SetDefault(prev)
+
+			isRunningInCloudRun = false
+
+			info := RequestInfo{
+				Method:     "GET",
+				Path:       "/x",
+				StatusCode: tc.status,
+				Headers:    map[string][]string{"Content-Type": {"application/json"}},
+				Error:      tc.err,
+			}
+			LogHttpInfo(nil, context.Background(), info, tc.isPanic)
+
+			if !strings.Contains(sink.String(), tc.wantLevel) {
+				t.Errorf("expected %s, got:\n%s", tc.wantLevel, sink.String())
+			}
+		})
+	}
+}
+
+// fmtErr returns a simple error value for tests.
+func fmtErr(s string) error { return &simpleErr{s} }
+
+type simpleErr struct{ msg string }
+
+func (e *simpleErr) Error() string { return e.msg }

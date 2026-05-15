@@ -307,11 +307,37 @@ func LogHttpInfo(c *gin.Context, ctx context.Context, errCtx RequestInfo, isPani
 
 	logger := FromContext(ctx)
 
-	var errorWrapped error
-	if errCtx.Error != nil {
+	// Pick the message + slog level based on what happened. Logging a 200
+	// at LevelError is misleading (and would panic on errorWrapped.Error()
+	// when there's no error); logging a 5xx at LevelInfo would hide real
+	// problems.
+	var (
+		errorWrapped error
+		msg          string
+		level        slog.Level
+	)
+	switch {
+	case isPanic:
+		if errCtx.Error != nil {
+			errorWrapped = errCtx.Error
+		} else {
+			errorWrapped = fmt.Errorf("panic recovered")
+		}
+		msg = errorWrapped.Error()
+		level = slog.LevelError
+	case errCtx.Error != nil:
 		errorWrapped = errCtx.Error
-	} else if isPanic {
-		errorWrapped = fmt.Errorf("panic recovered")
+		msg = errCtx.Error.Error()
+		level = slog.LevelError
+	case errCtx.StatusCode >= 500:
+		msg = "HTTP server error"
+		level = slog.LevelError
+	case errCtx.StatusCode >= 400:
+		msg = "HTTP client error"
+		level = slog.LevelWarn
+	default:
+		msg = "HTTP request"
+		level = slog.LevelInfo
 	}
 
 	attrs := []slog.Attr{
@@ -364,7 +390,7 @@ func LogHttpInfo(c *gin.Context, ctx context.Context, errCtx RequestInfo, isPani
 		}
 	}
 
-	logger.LogAttrs(ctx, slog.LevelError, errorWrapped.Error(), attrs...)
+	logger.LogAttrs(ctx, level, msg, attrs...)
 }
 
 func ExtractStackTrace(err error) string {

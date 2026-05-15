@@ -150,7 +150,11 @@ func (cfg Config) RespondHTMX(c *gin.Context, err error, options ...Option) {
 		comp = o.formFallback
 	}
 
-	c.Set(http_errors.ERROR_MESSAGE_CONTEXT_KEY, err)
+	// Only stash a non-nil error so the logger middleware doesn't see a
+	// nil-interface value (which used to panic the post-handler logger).
+	if err != nil {
+		c.Set(http_errors.ERROR_MESSAGE_CONTEXT_KEY, err)
+	}
 	cfg.Render(c, status, comp)
 }
 
@@ -158,7 +162,14 @@ func (cfg Config) RespondHTMX(c *gin.Context, err error, options ...Option) {
 // records it, without writing any response. Use in partial-degradation paths
 // that still return 200 (e.g. a dashboard section that renders a degraded
 // state instead of failing the whole page).
+//
+// No-op if err is nil — guards against callers that wrap an Execute() call
+// and forward its return value without checking, which would otherwise
+// stash a nil interface value and confuse the logger middleware.
 func (cfg Config) TagError(c *gin.Context, err error) {
+	if err == nil {
+		return
+	}
 	c.Set(http_errors.ERROR_MESSAGE_CONTEXT_KEY, err)
 }
 
