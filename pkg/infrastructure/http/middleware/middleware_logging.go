@@ -206,6 +206,7 @@ func (m *LoggerMiddleware) Middleware() gin.HandlerFunc {
 
 		statusCode := ctx.Writer.Status()
 		errorInContext, ok := ctx.Get(http_errors.ERROR_MESSAGE_CONTEXT_KEY)
+		
 		var errorInContextError error
 		if ok {
 			errorInContextError = errorInContext.(error)
