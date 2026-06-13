@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiban-cloud/go-kiban-fullstack/logger"
 	"github.com/kiban-cloud/go-kiban-fullstack/pkg/domain/commons"
 	"github.com/kiban-cloud/go-kiban-fullstack/pkg/infrastructure/appContext"
 	http_errors "github.com/kiban-cloud/go-kiban-fullstack/pkg/infrastructure/http/errors"
-	"github.com/kiban-cloud/go-kiban-fullstack/pkg/infrastructure/logger"
 
 	"github.com/gin-gonic/gin"
 )
@@ -170,7 +170,7 @@ func (m *LoggerMiddleware) Middleware() gin.HandlerFunc {
 					errCtx.Error = fmt.Errorf("panic: %v", err)
 				}
 
-				logger.LogHttpInfo(ctx, ctx.Request.Context(), errCtx, true)
+				logger.LogHttpInfo(ctx.Request.Context(), errCtx, true)
 				ctx.Set(alreadyLoggedKey, true)
 
 				if !ctx.Writer.Written() {
@@ -236,7 +236,7 @@ func (m *LoggerMiddleware) Middleware() gin.HandlerFunc {
 			Error:        errorInContextError,
 		}
 
-		logger.LogHttpInfo(ctx, ctx.Request.Context(), requestInfo, false)
+		logger.LogHttpInfo(ctx.Request.Context(), requestInfo, false)
 	}
 }
 

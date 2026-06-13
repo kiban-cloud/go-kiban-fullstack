@@ -3,7 +3,7 @@ package appContext
 import (
 	"context"
 
-	infrastructure_common "github.com/kiban-cloud/go-kiban-fullstack/pkg/infrastructure/common"
+	"github.com/kiban-cloud/go-kiban-fullstack/logger"
 
 	"github.com/gin-gonic/gin"
 )
@@ -21,9 +21,5 @@ func FromContextForTestingPurposes(ctx context.Context) RequestContext {
 }
 
 func WithRequestAndTraceID(ctx context.Context, requestID, traceID string) context.Context {
-	if traceID != "" {
-		ctx = context.WithValue(ctx, infrastructure_common.TRACE_KEY, traceID)
-	}
-	ctx = context.WithValue(ctx, infrastructure_common.REQUEST_ID, requestID)
-	return ctx
+	return logger.WithRequestAndTrace(ctx, requestID, traceID)
 }

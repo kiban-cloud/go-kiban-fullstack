@@ -197,7 +197,7 @@ func captureStdout(t *testing.T, fn func()) string {
 // TestLogHttpInfo_NoNilDeref_OnSuccess is the regression test for the bug
 // reported as "Postman sees 200 but the log shows ERR runtime error: nil
 // pointer dereference / status 500". Root cause: when the handler returned
-// successfully and nothing tagged an error, errCtx.Error was nil and
+// successfully and nothing tagged an error, info.Error was nil and
 // isPanic was false, but the post-handler code unconditionally called
 // errorWrapped.Error() — panic on nil interface. The deferred recover then
 // emitted a confusing fake 500.
@@ -235,7 +235,7 @@ func TestLogHttpInfo_NoNilDeref_OnSuccess(t *testing.T) {
 	}
 
 	// Must not panic.
-	LogHttpInfo(nil, context.Background(), info, false)
+	LogHttpInfo(context.Background(), info, false)
 
 	out := sink.String()
 	if !strings.Contains(out, `"level":"INFO"`) {
@@ -284,7 +284,7 @@ func TestLogHttpInfo_LevelMapping(t *testing.T) {
 				Headers:    map[string][]string{"Content-Type": {"application/json"}},
 				Error:      tc.err,
 			}
-			LogHttpInfo(nil, context.Background(), info, tc.isPanic)
+			LogHttpInfo(context.Background(), info, tc.isPanic)
 
 			if !strings.Contains(sink.String(), tc.wantLevel) {
 				t.Errorf("expected %s, got:\n%s", tc.wantLevel, sink.String())

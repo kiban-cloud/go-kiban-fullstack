@@ -5,8 +5,8 @@
 		"**/*_templ.go": true
 	},
 	"explorer.autoReveal": true,
-	"go.testTags": "integration",
-	"go.buildTags": "integration",
+	"go.testTags": "integration,prod_e2e",
+	"go.buildTags": "integration,prod_e2e",
 	"gopls": {
 		"ui.diagnostic.analyses": {
 			"unsafeptr": false
