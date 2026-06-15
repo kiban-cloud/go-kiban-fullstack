@@ -24,6 +24,11 @@ const (
 	LOG_LEVEL_ERROR LOG_LEVEL = "error"
 )
 
+// LevelCritical es un nivel por encima de slog.LevelError; el handler lo emite
+// como severity "CRITICAL" (que Cloud Logging reconoce). slog no tiene un nivel
+// crítico nativo. Úsalo para errores fatales (panics, fallos de arranque).
+const LevelCritical = slog.Level(12)
+
 var (
 	moduleName           string
 	isRunningInCloudRun  bool
@@ -62,6 +67,9 @@ func Init(opts InitOpts) {
 				switch a.Key {
 				case slog.LevelKey:
 					a.Key = "severity"
+					if lvl, ok := a.Value.Any().(slog.Level); ok && lvl >= LevelCritical {
+						a.Value = slog.StringValue("CRITICAL")
+					}
 				case slog.MessageKey:
 					a.Key = "message"
 				}
@@ -124,6 +132,13 @@ func FromContext(ctx context.Context) *slog.Logger {
 		)
 	}
 
+	// Labels stasheadas por el middleware (vía WithLabels) + el extractor opcional
+	// del Init (compat: datos-non-stop/reportalos lo usan para tenant_id).
+	for k, v := range labelsFromContext(ctx) {
+		if v != "" {
+			attrs = append(attrs, slog.String(k, v))
+		}
+	}
 	if labelsExtractor != nil {
 		for k, v := range labelsExtractor(ctx) {
 			if v != "" {

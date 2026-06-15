@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+// Headers de correlación. Cloud Run inyecta TRACE_HEADER automáticamente; el
+// middleware de cada repo genera REQUEST_ID_HEADER y lo devuelve al cliente.
+const (
+	REQUEST_ID_HEADER = "X-Request-ID"
+	TRACE_HEADER      = "X-Cloud-Trace-Context"
+)
+
 // requestIDAttr es el nombre del atributo en el log (no la llave del context).
 const requestIDAttr = "request_id"
 
@@ -19,6 +26,7 @@ type ctxKey int
 const (
 	keyRequestID ctxKey = iota
 	keyTrace
+	keyLabels
 )
 
 // WithRequestAndTrace propaga request_id y trace en el context para que los logs
@@ -31,6 +39,16 @@ func WithRequestAndTrace(ctx context.Context, requestID, trace string) context.C
 	return ctx
 }
 
+// WithLabels guarda labels por-request (tenant/auth tags) en el context. El
+// middleware las setea desde su hook Labels; FromContext las adjunta al log.
+// Cada proyecto decide cómo extraerlas (de gin context, de request.Context, etc.).
+func WithLabels(ctx context.Context, labels map[string]string) context.Context {
+	if len(labels) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, keyLabels, labels)
+}
+
 func RequestIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(keyRequestID).(string)
 	return v
@@ -38,6 +56,11 @@ func RequestIDFromContext(ctx context.Context) string {
 
 func TraceFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(keyTrace).(string)
+	return v
+}
+
+func labelsFromContext(ctx context.Context) map[string]string {
+	v, _ := ctx.Value(keyLabels).(map[string]string)
 	return v
 }
 
