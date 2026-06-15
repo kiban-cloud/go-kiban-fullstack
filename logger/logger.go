@@ -134,20 +134,33 @@ func FromContext(ctx context.Context) *slog.Logger {
 
 	// Labels stasheadas por el middleware (vía WithLabels) + el extractor opcional
 	// del Init (compat: datos-non-stop/reportalos lo usan para tenant_id).
+	// Saltamos las keys de correlación: FromContext ya las puso desde el context;
+	// si las labels (p.ej. los tags de auth) las traen, duplicarían trace/request_id.
 	for k, v := range labelsFromContext(ctx) {
-		if v != "" {
+		if v != "" && !isReservedCorrelationKey(k) {
 			attrs = append(attrs, slog.String(k, v))
 		}
 	}
 	if labelsExtractor != nil {
 		for k, v := range labelsExtractor(ctx) {
-			if v != "" {
+			if v != "" && !isReservedCorrelationKey(k) {
 				attrs = append(attrs, slog.String(k, v))
 			}
 		}
 	}
 
 	return slog.Default().With(attrs...)
+}
+
+// isReservedCorrelationKey identifica las keys que FromContext ya adjunta desde
+// el context (request_id/trace). Las labels no deben re-agregarlas o se duplican.
+func isReservedCorrelationKey(k string) bool {
+	switch k {
+	case requestIDAttr, "logging.googleapis.com/trace", "logging.googleapis.com/trace_sampled":
+		return true
+	default:
+		return false
+	}
 }
 
 type MyInterceptor struct {

@@ -293,6 +293,39 @@ func TestLogHttpInfo_LevelMapping(t *testing.T) {
 	}
 }
 
+// TestFromContext_NoDuplicateCorrelationFromLabels es la regresión del trace
+// duplicado en el log grueso: FromContext adjunta request_id/trace desde el
+// context, y si las labels stasheadas (p.ej. los tags de auth) también traen
+// esas keys, no deben re-agregarse (Cloud Logging las fusionaba → "traceXtraceX").
+func TestFromContext_NoDuplicateCorrelationFromLabels(t *testing.T) {
+	var sink bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&sink, nil)))
+	defer slog.SetDefault(prev)
+
+	trace := "projects/p/traces/abc123"
+	ctx := WithRequestAndTrace(context.Background(), "req-1", trace)
+	// Simula que las labels (tags de auth) también traen las keys de correlación.
+	ctx = WithLabels(ctx, map[string]string{
+		"logging.googleapis.com/trace": trace,
+		"request_id":                   "req-1",
+		"tenant_id":                    "t-1",
+	})
+
+	FromContext(ctx).Info("hello")
+	out := sink.String()
+
+	if n := strings.Count(out, `"logging.googleapis.com/trace":`); n != 1 {
+		t.Errorf("expected trace key exactly once, got %d:\n%s", n, out)
+	}
+	if n := strings.Count(out, `"request_id":`); n != 1 {
+		t.Errorf("expected request_id exactly once, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, `"tenant_id":"t-1"`) {
+		t.Errorf("expected tenant_id label preserved:\n%s", out)
+	}
+}
+
 // fmtErr returns a simple error value for tests.
 func fmtErr(s string) error { return &simpleErr{s} }
 
