@@ -326,6 +326,40 @@ func TestFromContext_NoDuplicateCorrelationFromLabels(t *testing.T) {
 	}
 }
 
+// TestLogHttpInfo_RedactsSensitiveHeaders asegura que el log grueso oculta el
+// valor de headers sensibles (Authorization, X-Api-Key, …) conservando la key.
+func TestLogHttpInfo_RedactsSensitiveHeaders(t *testing.T) {
+	var sink bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&sink, nil)))
+	defer slog.SetDefault(prev)
+
+	isRunningInCloudRun = false
+
+	info := RequestInfo{
+		Method:     "POST",
+		Path:       "/api/v1/curp/validate",
+		StatusCode: 200,
+		Headers: map[string][]string{
+			"Authorization": {"Bearer supersecret"},
+			"X-Api-Key":     {"KEY-1234-PLAIN"},
+			"Content-Type":  {"application/json"},
+		},
+	}
+	LogHttpInfo(context.Background(), info, false)
+	out := sink.String()
+
+	if strings.Contains(out, "supersecret") || strings.Contains(out, "KEY-1234-PLAIN") {
+		t.Errorf("se filtró el valor de un header sensible:\n%s", out)
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("se esperaba [REDACTED] para headers sensibles:\n%s", out)
+	}
+	if !strings.Contains(out, "application/json") {
+		t.Errorf("un header no sensible (Content-Type) debe conservarse:\n%s", out)
+	}
+}
+
 // fmtErr returns a simple error value for tests.
 func fmtErr(s string) error { return &simpleErr{s} }
 

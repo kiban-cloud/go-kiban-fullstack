@@ -32,6 +32,34 @@ var sensitiveFormFields = map[string]bool{
 	"authorization":    true,
 }
 
+// sensitiveHeaders se redactan al loguear los headers del request (el valor se
+// oculta, la key se conserva). Match case-insensitive.
+var sensitiveHeaders = map[string]bool{
+	"authorization":      true,
+	"x-api-key":          true,
+	"x-internal-api-key": true,
+	"x-auth-token":       true,
+	"cookie":             true,
+	"set-cookie":         true,
+}
+
+// redactHeaders devuelve una COPIA de los headers con los valores sensibles
+// ocultos. No muta el mapa original (es el del request).
+func redactHeaders(headers map[string][]string) map[string][]string {
+	if headers == nil {
+		return nil
+	}
+	redacted := make(map[string][]string, len(headers))
+	for k, v := range headers {
+		if sensitiveHeaders[strings.ToLower(k)] {
+			redacted[k] = []string{"[REDACTED]"}
+		} else {
+			redacted[k] = v
+		}
+	}
+	return redacted
+}
+
 // htmlResponseBodyMaxPreview limita el preview HTML logueado en errores.
 const htmlResponseBodyMaxPreview = 500
 
@@ -223,7 +251,7 @@ func LogHttpInfo(ctx context.Context, info RequestInfo, isPanic bool) {
 		slog.String("path", info.Path),
 		slog.String("ip", info.IP),
 		slog.String("user_agent", info.UserAgent),
-		slog.Any("headers", info.Headers),
+		slog.Any("headers", redactHeaders(info.Headers)),
 		slog.Int("status_code", info.StatusCode),
 	}
 
