@@ -297,6 +297,33 @@ func TestLogHttpInfo_LevelMapping(t *testing.T) {
 // duplicado en el log grueso: FromContext adjunta request_id/trace desde el
 // context, y si las labels stasheadas (p.ej. los tags de auth) también traen
 // esas keys, no deben re-agregarse (Cloud Logging las fusionaba → "traceXtraceX").
+func TestFromContext_NoDuplicateIPFromLabels(t *testing.T) {
+	var sink bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&sink, nil)))
+	defer slog.SetDefault(prev)
+
+	// Los tags de auth traen "ip" como label; el log grueso (LogHttpInfo) emite
+	// su propio "ip" explícito. Sin el skip, la key saldría dos veces.
+	ctx := WithLabels(context.Background(), map[string]string{
+		"ip":        "10.0.0.1",
+		"tenant_id": "t-1",
+	})
+
+	FromContext(ctx).LogAttrs(ctx, slog.LevelInfo, "http request", slog.String("ip", "9.9.9.9"))
+	out := sink.String()
+
+	if n := strings.Count(out, `"ip":`); n != 1 {
+		t.Errorf("expected ip key exactly once, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, `"ip":"9.9.9.9"`) {
+		t.Errorf("expected the explicit gross-log ip to win:\n%s", out)
+	}
+	if !strings.Contains(out, `"tenant_id":"t-1"`) {
+		t.Errorf("expected tenant_id label preserved:\n%s", out)
+	}
+}
+
 func TestFromContext_NoDuplicateCorrelationFromLabels(t *testing.T) {
 	var sink bytes.Buffer
 	prev := slog.Default()

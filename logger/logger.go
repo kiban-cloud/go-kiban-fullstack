@@ -152,11 +152,14 @@ func FromContext(ctx context.Context) *slog.Logger {
 	return slog.Default().With(attrs...)
 }
 
-// isReservedCorrelationKey identifica las keys que FromContext ya adjunta desde
-// el context (request_id/trace). Las labels no deben re-agregarlas o se duplican.
+// isReservedCorrelationKey identifica las keys que NO deben venir desde las
+// labels porque otra capa ya las emite, o se duplican en el record:
+//   - request_id / trace: los adjunta FromContext desde el context.
+//   - ip: lo emite LogHttpInfo explícitamente (c.ClientIP); el tag de auth lo
+//     trae también como label y chocaría con el del log grueso.
 func isReservedCorrelationKey(k string) bool {
 	switch k {
-	case requestIDAttr, "logging.googleapis.com/trace", "logging.googleapis.com/trace_sampled":
+	case requestIDAttr, "ip", "logging.googleapis.com/trace", "logging.googleapis.com/trace_sampled":
 		return true
 	default:
 		return false
