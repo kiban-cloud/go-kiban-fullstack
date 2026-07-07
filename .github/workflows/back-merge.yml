@@ -1,0 +1,10 @@
+name: back-merge
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  back-merge:
+    uses: kiban-cloud/gha-workflows/.github/workflows/back-merge.yml@main
