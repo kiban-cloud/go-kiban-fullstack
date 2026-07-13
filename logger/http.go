@@ -210,7 +210,10 @@ func appendResponseBodyAttrs(attrs []slog.Attr, contentType, body string) []slog
 // LogHttpInfo emite UN log estructurado por request, correlacionado vía FromContext.
 // Es gin-free: el middleware de cada repo arma el RequestInfo y lo llama.
 func LogHttpInfo(ctx context.Context, info RequestInfo, isPanic bool) {
-	if isRunningInCloudRun && isProd && info.StatusCode < 400 {
+	// En Cloud Run prod se descartan los requests exitosos para no inundar
+	// Cloud Logging — pero un error taggeado (TagError en una degradación
+	// parcial que responde 200) debe loguearse aunque el status sea <400.
+	if isRunningInCloudRun && isProd && info.StatusCode < 400 && info.Error == nil {
 		return
 	}
 
