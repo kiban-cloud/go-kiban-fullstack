@@ -2,6 +2,15 @@
 
 Guía para Claude Code al trabajar en cualquier proyecto que consuma este shared lib. Las reglas de abajo aplican para **todos** los proyectos Kiban que embeban `go-kiban-fullstack`. Cada proyecto debe importar este archivo en su propio `CLAUDE.md` vía `@../go-kiban-fullstack/CLAUDE.md` y agregar abajo sus reglas específicas.
 
+## Proyectos que consumen este shared lib
+
+Cuando un cambio acá afecte a los consumidores (bump de versión, regla nueva, breaking change), revisar/propagar en todos. Repos locales hermanos (`../<repo>`):
+
+**Apps:** `consulta-por-kiban`, `crm-backend`, `datos-non-stop`, `kiban-cloud-backend`, `klin-backend`, `microservices`, `rekon-backend`, `reportalos-backend`, `workfloo-backend`.
+**Libs compartidas que también lo consumen:** `go-kiban`, `go-kiban-design-system`.
+
+Mantener esta lista al día cuando se agregue un proyecto nuevo.
+
 ## Arquitectura en una línea
 
 Clean / Hexagonal: `cmd → http → controller/view → usecases → domain`, con `repository/` y `infrastructure/service/` implementando los puertos del dominio. **Las dependencias apuntan al centro; el dominio no importa frameworks.**
@@ -217,6 +226,22 @@ Toda vista `.templ` debe tener un test que la renderice. Cuando crees una vista 
 **Verificación red→green explícita.** Cuando arreglés un bug, dejá constancia en la respuesta de que ejecutaste los pasos 2 y 4 — por ejemplo, un revert temporal del fix para confirmar que el test atrapa la regresión, y luego restaurá el fix. No es opcional: sin este paso, el test puede pasar trivialmente sin estar verificando lo que crees.
 
 **Cuándo se permite saltearlo:** nunca. Si el bug está en un punto que físicamente no se puede testear (ej. arranque del proceso, código de boot que panic), el "test" puede ser un assert de configuración o un check estático — pero algo debe quedar registrado.
+
+## Logging
+
+**Regla: nunca logs sueltos con `log.Printf` / `fmt.Print*` en código que corre dentro de un request.** Todo logging está centralizado en el middleware logger (`go-kiban-fullstack/logger`): emite UN log estructurado por request (método, path, status, bodies, headers HTMX) hacia stdout/Cloud Logging. Un printf suelto muere sin correlación con la petición — no lleva request_id, ni path, ni trace — y duplica lo que el middleware ya registra.
+
+Cómo llega un error al log centralizado:
+
+- **La rama de error responde el request** → `htmxerror.Respond(c, err, ...)`. Setea el status real (4xx/5xx), renderiza el fragmento y deja el error en el context para que el middleware lo registre. No agregues un printf al lado.
+- **Degradación parcial que igual responde 200** (fallback, campo opcional que no cargó, snapshot que no decodificó) → `htmxerror.TagError(c, err)`. El middleware registra el error a nivel ERROR aunque el status sea <400 (logger ≥ v0.4.2 — versiones anteriores descartaban los <400 en Cloud Run prod). Si en la rama no hay un `err` (condición sin error, `usecaseErrors` sueltos, panic recuperado), construí uno: `TagError(c, fmt.Errorf("contexto: %v", detalle))`.
+- **Ramas que responden ≥400 sin taggear** ya se loguean solas (warn/error con request y response body), pero sin el `err` subyacente — taggealo igual para no perder el detalle.
+
+**Los helpers no se tragan errores.** Un helper llamado desde un handler que puede fallar de forma no-fatal debe **retornar el error al caller** (que tiene el `*gin.Context` y lo taggea) o, si la ergonomía lo amerita (helpers de hidratación usados inline en view-data), **recibir `c *gin.Context`** y taggear adentro. Lo que no puede hacer es capturar el error y printearlo: ahí muere el log.
+
+**Capas sin gin (usecases, repos, services) con operaciones best-effort.** Si una capa que solo tiene `context.Context` (p.ej. un usecase con `appContext.RequestContext`) necesita loguear un fallo no-fatal que por diseño no se propaga (un save de log best-effort), usá `logger.FromContext(ctx).Error("...", "error", err.Error())` — el middleware inyecta request_id/trace al `Request.Context()`, así que el log sale estructurado y correlacionado al request. Nunca `fmt.Printf` ni importar gin en el dominio.
+
+**Única excepción: código donde no existe request.** Carga inicial del server (`init()`, seed de caches embebidos, wiring de boot) y goroutines de background (warm-ups, jobs) no tienen petición a la cual asociar el error — ahí `log.Printf` es aceptable (o `log.Fatal` si el error es fatal de arranque). Dejá un comentario indicando por qué se loguea suelto.
 
 ## Seguridad
 
