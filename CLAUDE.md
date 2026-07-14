@@ -71,10 +71,19 @@ La pregunta clave: **¿este error se está originando ahora en esta línea, o se
 - **Se propaga un error que ya viene de otra capa nuestra** → `fmt.Errorf("contexto: %w", err)`.
   El `err` ya pasó por una función nuestra que lo originó con `errorsWrapper` (repo, service, usecase, helper propio). Nunca usar `errorsWrapper` aquí — duplicaría stacktrace. Ejemplos: usecase recibiendo un error del repo/service, controller recibiendo un error del usecase, middleware recibiendo un error de un servicio interno.
 
+- **Se re-clasifica un err existente bajo un sentinel (categorización)**: la forma depende de dónde nació ese err —
+  - El err viene **de otra capa nuestra** (repo/service/usecase ya capturó stack) → `fmt.Errorf("%w: %v", ErrSentinel, err)`. No usar `errorsWrapper` acá (duplicaría stacktrace).
+  - El err **nace en esta misma línea desde una lib externa/stdlib** (parseo, base64, json, strconv en la frontera) → `errorsWrapper.Wrapf(ErrSentinel, "contexto: %v", err)`. Es la combinación de la regla de origen con la de categorización: stack capturado en el origen, sentinel como objetivo de `errors.Is`, detalle original en el mensaje.
+
+  En ambos casos: **nunca devolver el sentinel pelado descartando el err** — se pierde el detalle en los logs. El sentinel decide el mapeo HTTP vía `errors.Is`. Excepciones donde el sentinel pelado sigue bien: el err ya se registró en esa misma rama (LoggerService/TagError), el err es un valor constante conocido dentro de un guard `errors.Is` (p.ej. `mongo.ErrNoDocuments` → `ErrNotFound`), o el mensaje del error llega crudo al usuario final y envolvería detalle interno.
+
 **Test rápido:**
 - ¿El error sale de una función `package.Foo()` de un módulo externo, sin pasar antes por código nuestro? → `errorsWrapper.Wrap`.
 - ¿No existía el error antes de esta línea y lo estás creando vos (con o sin sentinel)? → `errorsWrapper.New` / `errorsWrapper.Wrap(sentinel, …)`.
 - ¿El error ya venía con stack capturado desde otra función nuestra? → `fmt.Errorf("...: %w", err)`.
+- ¿Hay un err y lo estás convirtiendo a un sentinel de dominio? → si el err viene de otra capa nuestra, `fmt.Errorf("%w: %v", sentinel, err)`; si nace acá desde una lib externa, `errorsWrapper.Wrapf(sentinel, "contexto: %v", err)`.
+
+**Nunca comparar errores por igualdad.** Ni `err == ErrSentinel`, ni `switch err { case ErrSentinel: }` — cualquier sentinel puede venir envuelto y la igualdad deja de matchear (los mapeadores HTTP de go-kiban `controller_core` usan `errors.Is` desde v0.0.306). Siempre `errors.Is` / `errors.As`, o `switch { case errors.Is(err, X): }`.
 
 **Excepción: callbacks pasados a librerías externas.** Cuando escribís una función que vos no llamás directamente sino que se la pasás a una lib externa para que ella la ejecute (ej: el `Keyfunc` de `jwt.ParseWithClaims`, handlers HTTP de middleware ajeno, callbacks de reintentos, etc.), ese callback corre *dentro* del flujo de la lib externa y el error que retorna vuelve a tu código recién cuando la lib te lo devuelve. Si capturás stacktrace dentro del callback **y** después con `Wrap` en la frontera, el stacktrace bueno (el de la frontera) sobrescribe al del callback y perdés la línea real. **En callbacks así, retorná el error sin stack** — usá `fmt.Errorf("…")` o `errors.New("…")`. El `errorsWrapper.Wrap` que envuelve la llamada a la lib externa captura el stack correcto, en la frontera donde el error vuelve a nuestro código.
 
