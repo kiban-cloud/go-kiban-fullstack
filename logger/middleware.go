@@ -57,6 +57,19 @@ func (w *responseBodyWriter) WriteString(s string) (int, error) {
 // Middleware emite UN log estructurado por request (vía LogHttpInfo), genera
 // request_id, parsea trace, captura el body y recupera panics. Es el único
 // middleware de logging; cada repo lo monta con su propia config.
+// resolveTrace elige el trace del request entrante. TRACE_ID_HEADER gana sobre
+// TRACE_HEADER: si un servicio nuestro lo mandó, es el trace del request que
+// originó la cadena, mientras que TRACE_HEADER puede ser uno nuevo que la infra
+// generó en el salto (Cloud Tasks, Pub/Sub push). Si no viene ninguno, cae al
+// header de Cloud Run, que es el caso normal de un request externo.
+func resolveTrace(c *gin.Context) string {
+	if traceID := c.GetHeader(TRACE_ID_HEADER); traceID != "" {
+		return TraceFromID(traceID)
+	}
+
+	return ParseTraceContext(c.GetHeader(TRACE_HEADER))
+}
+
 func Middleware(cfg MiddlewareConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if cfg.shouldSkip(c.Request.URL.Path) {
@@ -68,7 +81,7 @@ func Middleware(cfg MiddlewareConfig) gin.HandlerFunc {
 
 		requestID := uuid.NewString()
 		c.Header(REQUEST_ID_HEADER, requestID)
-		trace := ParseTraceContext(c.GetHeader(TRACE_HEADER))
+		trace := resolveTrace(c)
 		c.Request = c.Request.WithContext(WithRequestAndTrace(c.Request.Context(), requestID, trace))
 
 		var requestBody []byte
