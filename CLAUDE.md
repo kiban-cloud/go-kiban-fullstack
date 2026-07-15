@@ -252,10 +252,78 @@ Cómo llega un error al log centralizado:
 
 **Única excepción: código donde no existe request.** Carga inicial del server (`init()`, seed de caches embebidos, wiring de boot) y goroutines de background (warm-ups, jobs) no tienen petición a la cual asociar el error — ahí `log.Printf` es aceptable (o `log.Fatal` si el error es fatal de arranque). Dejá un comentario indicando por qué se loguea suelto.
 
+## Credenciales GCP: keyless siempre (ADC + impersonation)
+
+**Regla: nunca una llave de service account en el repo.** Ni un `service_account*.json` commiteado, ni una `PrivateKey` embebida en un string de Go, ni un `COPY service_account.json` en el Dockerfile, ni `GOOGLE_APPLICATION_CREDENTIALS` apuntando a un archivo del build. En julio 2026 hubo que rotar ~10 service accounts (incluidos de prod) por llaves filtradas en git de esta forma.
+
+**Cómo se autentica el código (todos los entornos).** Creá los clientes con ADC y nada más:
+
+```go
+client, err := storage.NewClient(ctx)          // ✅ ADC
+client, err := secretmanager.NewClient(ctx)    // ✅ ADC
+// ❌ NUNCA: option.WithCredentialsFile("service_account.json")
+```
+
+La ADC resuelve sola: en **Cloud Run / GCE** al *runtime SA* del servicio vía metadata server (lo asigna el terraform: `kiban-cloud-infra-test@learned-shape-443815-u9` en develop/hotfix, `kiban-cloud-infra-prod@kiban-cloud` en prod); en **local**, a lo que hayas configurado con `gcloud` (ver abajo). Nunca hay una llave en disco.
+
+**Firmar URLs de GCS** (signed URLs): jamás con `PrivateKey`. Se firma vía la IAM Credentials API (`signBlob`) pidiéndole al SA que firme, autenticándose con ADC:
+
+```go
+c, err := credentials.NewIamCredentialsClient(ctx)   // ADC
+defer c.Close()
+opts.GoogleAccessID = config.AppConfig.ServiceAccount // env SERVICE_ACCOUNT = runtime SA
+opts.SignBytes = func(b []byte) ([]byte, error) {
+    resp, err := c.SignBlob(ctx, &credentialspb.SignBlobRequest{Payload: b, Name: config.AppConfig.ServiceAccount})
+    if err != nil { return nil, fmt.Errorf("signing blob: %w", err) }  // callback: sin stack
+    return resp.SignedBlob, nil
+}
+url, err := storage.SignedURL(bucket, path, opts)
+```
+
+El runtime SA ya tiene `tokenCreator` sobre sí mismo (grant `runtime_self_token_creator` en el terraform de kiban-cloud), así que esto funciona desplegado sin nada extra. Referencia viva: `klin-backend/internal/infrastructure/service/google/ServiceGoogleStorage.go`.
+
+**Nada de ramas `if IsDev()` con credenciales distintas.** Un solo camino para todos los entornos: si local firma/actúa como otro SA que prod, los bugs del path de credenciales sólo aparecen ya desplegado.
+
+### Desarrollo local: impersonation, no llaves
+
+Una sola vez por dev:
+
+```bash
+gcloud auth application-default login \
+  --impersonate-service-account=kiban-cloud-infra-test@learned-shape-443815-u9.iam.gserviceaccount.com
+```
+
+Qué hace: guarda una ADC de tipo *impersonated_service_account* (tu usuario como origen, el SA como destino). Al arrancar tu app, cualquier cliente de Google se autentica **como vos**, le pide a IAM un token de acceso **del SA**, y usa ese token. **Tu app local corre con la identidad del SA — igual que el Cloud Run desplegado.**
+
+Afecta **todo lo que use ADC**, no solo GCS: firma de URLs, lectura/escritura de buckets, Secret Manager, BigQuery, Pub/Sub, Logging.
+
+Por qué así y no bajando un json:
+- **Sin secreto en disco**: tokens de ~1h que se renuevan solos. Nada que filtrar ni rotar.
+- **Paridad con el deploy**: misma identidad → si anda local, anda desplegado (y viceversa).
+- **Auditoría**: Cloud Audit Logs registran el SA **y la persona** que lo impersonó. Una llave compartida no dice quién fue.
+- **Revocación instantánea**: se quita el grant y listo, sin rotar nada para los demás.
+- **Menos privilegio en humanos**: el dev no necesita permisos de storage/bigquery en su usuario; sólo `tokenCreator` sobre el SA.
+
+Único requisito (grant al **grupo** de devs, no persona por persona). El mismo rol cubre las dos operaciones que se usan — `generateAccessToken` (actuar como el SA) y `signBlob` (que el SA firme):
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  kiban-cloud-infra-test@learned-shape-443815-u9.iam.gserviceaccount.com \
+  --member="group:devs@kiban.com" --role="roles/iam.serviceAccountTokenCreator" \
+  --project=learned-shape-443815-u9
+```
+
+Confusiones frecuentes:
+- **ADC ≠ gcloud CLI.** El flag afecta la ADC (lo que usan tus apps). Tus comandos `gcloud ...` siguen corriendo como vos; para que el CLI también impersone: `gcloud config set auth/impersonate_service_account SA_EMAIL`.
+- Sin el grant vas a ver `Permission iam.serviceAccounts.signBlob denied` (o `...getAccessToken denied`) — es el error esperado, no un bug.
+- **CORS no tiene nada que ver.** Es config del bucket vs el Origin del navegador; ninguna credencial lo afecta.
+- No hace falta "tener" el SA ni su llave: le pedís a IAM que actúe/firme por vos. Idealmente el SA no tiene llave descargable en absoluto.
+
 ## Seguridad
 
 - Nunca loguear passwords, tokens, API keys ni firmas de webhook.
 - Nunca aceptar input del usuario sin `strings.TrimSpace` en el controller.
+- Nunca commitear llaves de service account ni secretos — ver [Credenciales GCP](#credenciales-gcp-keyless-siempre-adc--impersonation).
 
 ## Qué NO asumir
 
