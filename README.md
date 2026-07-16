@@ -77,6 +77,43 @@ GOOGLE_APPLICATION_CREDENTIALS=~/.gcloud-impersonated/application_default_creden
 
 Ese `GOOGLE_APPLICATION_CREDENTIALS` apunta a una **config de impersonation** (no contiene ninguna llave privada, solo referencia tus credenciales) — no es lo mismo que apuntarlo a una llave de service account, que está prohibido.
 
+### En VS Code: una config de launch aparte
+
+Para no tener que exportar la variable a mano en cada corrida, dejá el contexto impersonado en una configuración propia del `.vscode/launch.json`, **además** de la normal. Así elegís identidad desde el dropdown: la default corre como tu usuario, la otra como el runtime SA. Referencia viva: [`klin-backend/.vscode/launch.json`](https://bitbucket.org/alexandregrin/klin-backend/src/develop/.vscode/launch.json).
+
+```jsonc
+{
+  // Corre el proyecto con la MISMA identidad que Cloud Run (el runtime SA),
+  // en vez de con tu usuario. Útil para probar todo lo que use ADC:
+  // firmar signed URLs, subir/bajar de GCS, Secret Manager, BigQuery.
+  //
+  // Requiere crear el contexto UNA vez (deja tu ADC normal intacta, para que
+  // terraform y gcloud sigan corriendo como vos):
+  //
+  //   CLOUDSDK_CONFIG=~/.gcloud-impersonated gcloud auth application-default login \
+  //     --impersonate-service-account=kiban-cloud-infra-test@learned-shape-443815-u9.iam.gserviceaccount.com
+  //
+  // Si el archivo no existe, la ADC falla duro: usá la config normal hasta crearlo.
+  "name": "<proyecto>: Launch Debug (SA impersonado)",
+  "type": "go",
+  "request": "launch",
+  "mode": "debug",
+  "program": "${workspaceFolder}/cmd/api",
+  "cwd": "${workspaceFolder}",
+  "env": {
+    "GOOGLE_APPLICATION_CREDENTIALS": "${userHome}/.gcloud-impersonated/application_default_credentials.json"
+  }
+}
+```
+
+`${userHome}` lo resuelve VS Code, así que la config es portable entre máquinas.
+
+**Lo que tiene que hacer cada dev** (una sola vez, y solo si va a tocar GCS / signed URLs):
+
+1. Estar en el grupo `devs@kiban.com` — el grant de `serviceAccountTokenCreator` es al grupo.
+2. Correr el comando `CLOUDSDK_CONFIG=…` del comentario de arriba.
+3. Elegir **"Launch Debug (SA impersonado)"** en el dropdown de VS Code. Con la config default seguís corriendo como tu usuario — que suele tener permisos más altos que el SA y te esconde los errores que después aparecen en el deploy.
+
 ### Notas
 
 - El runtime SA de prod es `kiban-cloud-infra-prod@kiban-cloud`. Los devs **no** lo impersonan.
