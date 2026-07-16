@@ -249,6 +249,57 @@ func TestLogHttpInfo_NoNilDeref_OnSuccess(t *testing.T) {
 	}
 }
 
+// TestLogHttpInfo_ProdGate covers the Cloud-Run-prod early return: successful
+// requests (<400, sin error) se descartan para no inundar Cloud Logging, pero
+// un error taggeado vía TagError en una degradación parcial que responde 200
+// DEBE loguearse — era el hueco que hacía invisibles esos errores en prod.
+func TestLogHttpInfo_ProdGate(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		err      error
+		wantLog  bool
+		wantMark string
+	}{
+		{"prod 200 sin error → descartado", 200, nil, false, ""},
+		{"prod 200 con error taggeado → ERROR", 200, fmtErr("degradación parcial"), true, `"level":"ERROR"`},
+		{"prod 404 sin error → WARN", 404, nil, true, `"level":"WARN"`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sink bytes.Buffer
+			handler := slog.NewJSONHandler(&sink, &slog.HandlerOptions{Level: slog.LevelDebug})
+			prev := slog.Default()
+			slog.SetDefault(slog.New(handler))
+			defer slog.SetDefault(prev)
+
+			prevCloudRun, prevProd := isRunningInCloudRun, isProd
+			isRunningInCloudRun, isProd = true, true
+			defer func() { isRunningInCloudRun, isProd = prevCloudRun, prevProd }()
+
+			info := RequestInfo{
+				Method:     "GET",
+				Path:       "/x",
+				StatusCode: tc.status,
+				Headers:    map[string][]string{"Content-Type": {"application/json"}},
+				Error:      tc.err,
+			}
+			LogHttpInfo(context.Background(), info, false)
+
+			if !tc.wantLog {
+				if sink.Len() > 0 {
+					t.Errorf("expected no log for %s, got:\n%s", tc.name, sink.String())
+				}
+				return
+			}
+			if !strings.Contains(sink.String(), tc.wantMark) {
+				t.Errorf("expected %s, got:\n%s", tc.wantMark, sink.String())
+			}
+		})
+	}
+}
+
 // TestLogHttpInfo_LevelMapping covers the level-by-status policy so future
 // changes don't accidentally swap them.
 func TestLogHttpInfo_LevelMapping(t *testing.T) {

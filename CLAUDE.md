@@ -2,6 +2,15 @@
 
 Guía para Claude Code al trabajar en cualquier proyecto que consuma este shared lib. Las reglas de abajo aplican para **todos** los proyectos Kiban que embeban `go-kiban-fullstack`. Cada proyecto debe importar este archivo en su propio `CLAUDE.md` vía `@../go-kiban-fullstack/CLAUDE.md` y agregar abajo sus reglas específicas.
 
+## Proyectos que consumen este shared lib
+
+Cuando un cambio acá afecte a los consumidores (bump de versión, regla nueva, breaking change), revisar/propagar en todos. Repos locales hermanos (`../<repo>`):
+
+**Apps:** `consulta-por-kiban`, `crm-backend`, `datos-non-stop`, `kiban-cloud-backend`, `klin-backend`, `microservices`, `rekon-backend`, `reportalos-backend`, `workfloo-backend`.
+**Libs compartidas que también lo consumen:** `go-kiban`, `go-kiban-design-system`.
+
+Mantener esta lista al día cuando se agregue un proyecto nuevo.
+
 ## Arquitectura en una línea
 
 Clean / Hexagonal: `cmd → http → controller/view → usecases → domain`, con `repository/` y `infrastructure/service/` implementando los puertos del dominio. **Las dependencias apuntan al centro; el dominio no importa frameworks.**
@@ -62,10 +71,19 @@ La pregunta clave: **¿este error se está originando ahora en esta línea, o se
 - **Se propaga un error que ya viene de otra capa nuestra** → `fmt.Errorf("contexto: %w", err)`.
   El `err` ya pasó por una función nuestra que lo originó con `errorsWrapper` (repo, service, usecase, helper propio). Nunca usar `errorsWrapper` aquí — duplicaría stacktrace. Ejemplos: usecase recibiendo un error del repo/service, controller recibiendo un error del usecase, middleware recibiendo un error de un servicio interno.
 
+- **Se re-clasifica un err existente bajo un sentinel (categorización)**: la forma depende de dónde nació ese err —
+  - El err viene **de otra capa nuestra** (repo/service/usecase ya capturó stack) → `fmt.Errorf("%w: %v", ErrSentinel, err)`. No usar `errorsWrapper` acá (duplicaría stacktrace).
+  - El err **nace en esta misma línea desde una lib externa/stdlib** (parseo, base64, json, strconv en la frontera) → `errorsWrapper.Wrapf(ErrSentinel, "contexto: %v", err)`. Es la combinación de la regla de origen con la de categorización: stack capturado en el origen, sentinel como objetivo de `errors.Is`, detalle original en el mensaje.
+
+  En ambos casos: **nunca devolver el sentinel pelado descartando el err** — se pierde el detalle en los logs. El sentinel decide el mapeo HTTP vía `errors.Is`. Excepciones donde el sentinel pelado sigue bien: el err ya se registró en esa misma rama (LoggerService/TagError), el err es un valor constante conocido dentro de un guard `errors.Is` (p.ej. `mongo.ErrNoDocuments` → `ErrNotFound`), o el mensaje del error llega crudo al usuario final y envolvería detalle interno.
+
 **Test rápido:**
 - ¿El error sale de una función `package.Foo()` de un módulo externo, sin pasar antes por código nuestro? → `errorsWrapper.Wrap`.
 - ¿No existía el error antes de esta línea y lo estás creando vos (con o sin sentinel)? → `errorsWrapper.New` / `errorsWrapper.Wrap(sentinel, …)`.
 - ¿El error ya venía con stack capturado desde otra función nuestra? → `fmt.Errorf("...: %w", err)`.
+- ¿Hay un err y lo estás convirtiendo a un sentinel de dominio? → si el err viene de otra capa nuestra, `fmt.Errorf("%w: %v", sentinel, err)`; si nace acá desde una lib externa, `errorsWrapper.Wrapf(sentinel, "contexto: %v", err)`.
+
+**Nunca comparar errores por igualdad.** Ni `err == ErrSentinel`, ni `switch err { case ErrSentinel: }` — cualquier sentinel puede venir envuelto y la igualdad deja de matchear (los mapeadores HTTP de go-kiban `controller_core` usan `errors.Is` desde v0.0.306). Siempre `errors.Is` / `errors.As`, o `switch { case errors.Is(err, X): }`.
 
 **Excepción: callbacks pasados a librerías externas.** Cuando escribís una función que vos no llamás directamente sino que se la pasás a una lib externa para que ella la ejecute (ej: el `Keyfunc` de `jwt.ParseWithClaims`, handlers HTTP de middleware ajeno, callbacks de reintentos, etc.), ese callback corre *dentro* del flujo de la lib externa y el error que retorna vuelve a tu código recién cuando la lib te lo devuelve. Si capturás stacktrace dentro del callback **y** después con `Wrap` en la frontera, el stacktrace bueno (el de la frontera) sobrescribe al del callback y perdés la línea real. **En callbacks así, retorná el error sin stack** — usá `fmt.Errorf("…")` o `errors.New("…")`. El `errorsWrapper.Wrap` que envuelve la llamada a la lib externa captura el stack correcto, en la frontera donde el error vuelve a nuestro código.
 
@@ -218,10 +236,94 @@ Toda vista `.templ` debe tener un test que la renderice. Cuando crees una vista 
 
 **Cuándo se permite saltearlo:** nunca. Si el bug está en un punto que físicamente no se puede testear (ej. arranque del proceso, código de boot que panic), el "test" puede ser un assert de configuración o un check estático — pero algo debe quedar registrado.
 
+## Logging
+
+**Regla: nunca logs sueltos con `log.Printf` / `fmt.Print*` en código que corre dentro de un request.** Todo logging está centralizado en el middleware logger (`go-kiban-fullstack/logger`): emite UN log estructurado por request (método, path, status, bodies, headers HTMX) hacia stdout/Cloud Logging. Un printf suelto muere sin correlación con la petición — no lleva request_id, ni path, ni trace — y duplica lo que el middleware ya registra.
+
+Cómo llega un error al log centralizado:
+
+- **La rama de error responde el request** → `htmxerror.Respond(c, err, ...)`. Setea el status real (4xx/5xx), renderiza el fragmento y deja el error en el context para que el middleware lo registre. No agregues un printf al lado.
+- **Degradación parcial que igual responde 200** (fallback, campo opcional que no cargó, snapshot que no decodificó) → `htmxerror.TagError(c, err)`. El middleware registra el error a nivel ERROR aunque el status sea <400 (logger ≥ v0.4.2 — versiones anteriores descartaban los <400 en Cloud Run prod). Si en la rama no hay un `err` (condición sin error, `usecaseErrors` sueltos, panic recuperado), construí uno: `TagError(c, fmt.Errorf("contexto: %v", detalle))`.
+- **Ramas que responden ≥400 sin taggear** ya se loguean solas (warn/error con request y response body), pero sin el `err` subyacente — taggealo igual para no perder el detalle.
+
+**Los helpers no se tragan errores.** Un helper llamado desde un handler que puede fallar de forma no-fatal debe **retornar el error al caller** (que tiene el `*gin.Context` y lo taggea) o, si la ergonomía lo amerita (helpers de hidratación usados inline en view-data), **recibir `c *gin.Context`** y taggear adentro. Lo que no puede hacer es capturar el error y printearlo: ahí muere el log.
+
+**Capas sin gin (usecases, repos, services) con operaciones best-effort.** Si una capa que solo tiene `context.Context` (p.ej. un usecase con `appContext.RequestContext`) necesita loguear un fallo no-fatal que por diseño no se propaga (un save de log best-effort), usá `logger.FromContext(ctx).Error("...", "error", err.Error())` — el middleware inyecta request_id/trace al `Request.Context()`, así que el log sale estructurado y correlacionado al request. Nunca `fmt.Printf` ni importar gin en el dominio.
+
+**Única excepción: código donde no existe request.** Carga inicial del server (`init()`, seed de caches embebidos, wiring de boot) y goroutines de background (warm-ups, jobs) no tienen petición a la cual asociar el error — ahí `log.Printf` es aceptable (o `log.Fatal` si el error es fatal de arranque). Dejá un comentario indicando por qué se loguea suelto.
+
+## Credenciales GCP: keyless siempre (ADC + impersonation)
+
+**Regla: nunca una llave de service account en el repo.** Ni un `service_account*.json` commiteado, ni una `PrivateKey` embebida en un string de Go, ni un `COPY service_account.json` en el Dockerfile, ni `GOOGLE_APPLICATION_CREDENTIALS` apuntando a un archivo del build. En julio 2026 hubo que rotar ~10 service accounts (incluidos de prod) por llaves filtradas en git de esta forma.
+
+**Cómo se autentica el código (todos los entornos).** Creá los clientes con ADC y nada más:
+
+```go
+client, err := storage.NewClient(ctx)          // ✅ ADC
+client, err := secretmanager.NewClient(ctx)    // ✅ ADC
+// ❌ NUNCA: option.WithCredentialsFile("service_account.json")
+```
+
+La ADC resuelve sola: en **Cloud Run / GCE** al *runtime SA* del servicio vía metadata server (lo asigna el terraform: `kiban-cloud-infra-test@learned-shape-443815-u9` en develop/hotfix, `kiban-cloud-infra-prod@kiban-cloud` en prod); en **local**, a lo que hayas configurado con `gcloud` (ver abajo). Nunca hay una llave en disco.
+
+**Firmar URLs de GCS** (signed URLs): jamás con `PrivateKey`. Se firma vía la IAM Credentials API (`signBlob`) pidiéndole al SA que firme, autenticándose con ADC:
+
+```go
+c, err := credentials.NewIamCredentialsClient(ctx)   // ADC
+defer c.Close()
+opts.GoogleAccessID = config.AppConfig.ServiceAccount // env SERVICE_ACCOUNT = runtime SA
+opts.SignBytes = func(b []byte) ([]byte, error) {
+    resp, err := c.SignBlob(ctx, &credentialspb.SignBlobRequest{Payload: b, Name: config.AppConfig.ServiceAccount})
+    if err != nil { return nil, fmt.Errorf("signing blob: %w", err) }  // callback: sin stack
+    return resp.SignedBlob, nil
+}
+url, err := storage.SignedURL(bucket, path, opts)
+```
+
+El runtime SA ya tiene `tokenCreator` sobre sí mismo (grant `runtime_self_token_creator` en el terraform de kiban-cloud), así que esto funciona desplegado sin nada extra. Referencia viva: `klin-backend/internal/infrastructure/service/google/ServiceGoogleStorage.go`.
+
+**Nada de ramas `if IsDev()` con credenciales distintas.** Un solo camino para todos los entornos: si local firma/actúa como otro SA que prod, los bugs del path de credenciales sólo aparecen ya desplegado.
+
+### Desarrollo local: impersonation, no llaves
+
+Una sola vez por dev:
+
+```bash
+gcloud auth application-default login \
+  --impersonate-service-account=kiban-cloud-infra-test@learned-shape-443815-u9.iam.gserviceaccount.com
+```
+
+Qué hace: guarda una ADC de tipo *impersonated_service_account* (tu usuario como origen, el SA como destino). Al arrancar tu app, cualquier cliente de Google se autentica **como vos**, le pide a IAM un token de acceso **del SA**, y usa ese token. **Tu app local corre con la identidad del SA — igual que el Cloud Run desplegado.**
+
+Afecta **todo lo que use ADC**, no solo GCS: firma de URLs, lectura/escritura de buckets, Secret Manager, BigQuery, Pub/Sub, Logging.
+
+Por qué así y no bajando un json:
+- **Sin secreto en disco**: tokens de ~1h que se renuevan solos. Nada que filtrar ni rotar.
+- **Paridad con el deploy**: misma identidad → si anda local, anda desplegado (y viceversa).
+- **Auditoría**: Cloud Audit Logs registran el SA **y la persona** que lo impersonó. Una llave compartida no dice quién fue.
+- **Revocación instantánea**: se quita el grant y listo, sin rotar nada para los demás.
+- **Menos privilegio en humanos**: el dev no necesita permisos de storage/bigquery en su usuario; sólo `tokenCreator` sobre el SA.
+
+Único requisito (grant al **grupo** de devs, no persona por persona). El mismo rol cubre las dos operaciones que se usan — `generateAccessToken` (actuar como el SA) y `signBlob` (que el SA firme):
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  kiban-cloud-infra-test@learned-shape-443815-u9.iam.gserviceaccount.com \
+  --member="group:devs@kiban.com" --role="roles/iam.serviceAccountTokenCreator" \
+  --project=learned-shape-443815-u9
+```
+
+Confusiones frecuentes:
+- **ADC ≠ gcloud CLI.** El flag afecta la ADC (lo que usan tus apps). Tus comandos `gcloud ...` siguen corriendo como vos; para que el CLI también impersone: `gcloud config set auth/impersonate_service_account SA_EMAIL`.
+- Sin el grant vas a ver `Permission iam.serviceAccounts.signBlob denied` (o `...getAccessToken denied`) — es el error esperado, no un bug.
+- **CORS no tiene nada que ver.** Es config del bucket vs el Origin del navegador; ninguna credencial lo afecta.
+- No hace falta "tener" el SA ni su llave: le pedís a IAM que actúe/firme por vos. Idealmente el SA no tiene llave descargable en absoluto.
+
 ## Seguridad
 
 - Nunca loguear passwords, tokens, API keys ni firmas de webhook.
 - Nunca aceptar input del usuario sin `strings.TrimSpace` en el controller.
+- Nunca commitear llaves de service account ni secretos — ver [Credenciales GCP](#credenciales-gcp-keyless-siempre-adc--impersonation).
 
 ## Qué NO asumir
 

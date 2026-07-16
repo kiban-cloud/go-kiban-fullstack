@@ -24,7 +24,13 @@ func (s *CookieService) SetCookie(c *gin.Context, session *domain_session.Sessio
 	if s.isDev {
 		c.SetSameSite(http.SameSiteNoneMode)
 	} else {
-		c.SetSameSite(http.SameSiteStrictMode)
+		// Lax, not Strict: the session is set inside the OAuth callback and
+		// followed by a redirect to the dashboard. That redirect is the first
+		// hop after a cross-site navigation from the identity provider, and a
+		// Strict cookie is withheld on it — the dashboard would see no session
+		// and bounce back to /login. Lax is sent on top-level GET navigations
+		// while still blocking CSRF on state-changing POSTs.
+		c.SetSameSite(http.SameSiteLaxMode)
 	}
 	c.SetCookie(sessionCookieName, session.ID, int(time.Until(session.ExpiresAt).Seconds()), "/", "", true, true)
 }
