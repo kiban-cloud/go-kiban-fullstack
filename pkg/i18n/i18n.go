@@ -158,6 +158,20 @@ func (c *Catalog) IsSupported(lang string) bool {
 	return false
 }
 
+// FirstSupported returns the first preference that IsSupported, or "" when
+// none are. Unlike Match it does NOT fall back to the default — so callers can
+// tell "an explicit supported choice was made" (user language, org default)
+// apart from "no choice", which matters when deciding whether to set the
+// cross-app cookie or leave the browser's Accept-Language to apply.
+func (c *Catalog) FirstSupported(prefs ...string) string {
+	for _, p := range prefs {
+		if c.IsSupported(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 // Match picks the best supported language for ordered preferences (an
 // Accept-Language header, say). Unlike IsSupported it always returns a
 // supported language — the default when nothing matches — so it's the right
