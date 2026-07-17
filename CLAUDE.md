@@ -21,6 +21,8 @@ Clean / Hexagonal: `cmd → http → controller/view → usecases → domain`, c
 cmd/api/                       entrypoint + wireDependencies + rutas
 internal/
   config/                      lectura de env (embebe config.Base del shared lib)
+  i18n/                        Catalog propio del proyecto: embebe locales/{es,en}.toml
+                               (la maquinaria es compartida: pkg/i18n de este shared lib)
   controller/http/<feature>/   handlers Gin (HTTP ↔ usecase)
   domain/<entity>/             entidades + errores + puertos (Go puro)
   infrastructure/              http router, appContext, services externos
@@ -125,15 +127,49 @@ if err := c.ShouldBind(&req); err != nil {
 - HTMX para interactividad: `hx-post`, `hx-target`, `hx-swap` — no JavaScript custom salvo casos puntuales.
 - Renderizado server-side vía `view.Render(c, status, Component(data))`.
 
-### Texto en español: signos de pregunta y exclamación
+### i18n: TODO texto visible al usuario va traducido — nunca hardcodeado
 
-Todo texto visible al usuario está en español. **Las preguntas siempre abren con `¿` y cierran con `?`** — la apertura no es opcional. Aplica a títulos de página, copys de botones/links, mensajes en `hx-confirm`, banners de error o éxito y cualquier label. Lo mismo con exclamaciones: abren con `¡` y cierran con `!`.
+> **Regla dura:** ningún string visible al usuario se escribe literal en un `.templ` ni en un controller. **Siempre** `i18n.T(ctx, "<clave>")`, con la clave dada de alta en **ambos** bundles (`es.toml` **y** `en.toml`). Español es el default; inglés es obligatorio en el mismo commit. Un PR que agrega copy en español sin su clave en inglés está incompleto.
 
-Ejemplos:
-- ✅ `¿No tienes cuenta?`, `¿Olvidaste tu contraseña?`, `¿Estás seguro de eliminar este contacto?`
-- ❌ `No tienes cuenta?`, `Olvidaste tu contraseña?`, `Estás seguro de eliminar este contacto?`
+La maquinaria es compartida y vive acá: **`pkg/i18n`** (`Catalog` + `T`/`Tf` + `Middleware` + `CookieLang`). Cada proyecto consumidor solo aporta **su contenido**: un paquete `i18n` propio que embebe `locales/es.toml` + `locales/en.toml` y construye el `Catalog`. La plomería no se reimplementa por proyecto.
 
-Cuando agregues una pregunta nueva en cualquier `.templ`, abrí siempre con `¿`. Si refactorizás un componente compartido (ej. modales de confirmación en `view/common/`), respetá el mismo criterio.
+**Cómo se escribe:**
+
+```go
+// En .templ — ctx lo recibe todo componente templ, gratis:
+<h1>{ i18n.T(ctx, "customers.list.title") }</h1>
+@ds_button.Button(ds_button.Options{ Label: i18n.T(ctx, "common.save_changes") })
+
+// En un controller htmx:
+form.GlobalError = i18n.T(c.Request.Context(), "customers.error.save_failed")
+
+// Con interpolación (los valores llevan {{.Campo}}):
+i18n.Tf(ctx, "customers.delete_confirm", map[string]any{"Name": row.Name})
+```
+
+**Si un helper Go necesita texto, se le pasa `ctx`** (`func statusLabel(ctx context.Context, code string) string`) y se actualizan los call sites — no se deja el string en español "porque la función no tiene ctx".
+
+**Cómo elige el idioma un request** (no requiere tocar auth ni el modelo de usuario): kiban-cloud resuelve la precedencia **`user.Language` > `Company.DefaultLanguage` > `es`** al hacer login y escribe el resultado en la cookie same-origin **`kiban_lang`**. Cada app hermana solo monta `Catalog.Middleware(fsi18n.CookieLang)` sobre sus rutas htmx: lee la cookie (fallback `Accept-Language`, luego el default) e inyecta el idioma en `c.Request.Context()`. Como `view.Render` renderiza templ contra `c.Request.Context()`, todos los componentes lo reciben solos.
+
+**Convenciones de claves:**
+- Planas y namespaceadas por área: `"customers.list.title"`, `"profile.twofa.activate"`. Compartidas en `common.*` / `nav.*`.
+- Los sets de claves de `es.toml` y `en.toml` deben ser **idénticos**. Mantené el test `TestBundleParity` — es la red que atrapa la clave olvidada en un idioma.
+- **Clave faltante ⇒ se renderiza el id crudo en pantalla** (`T` devuelve la clave). Por eso los tests de views que asertan el texto en español son valiosos: detectan el "key echo".
+
+**Trampas reales (ya nos mordieron):**
+- **go-i18n ejecuta *todo* valor como `text/template`.** Un valor con `{{` que **no** sea interpolación real falla y devuelve la clave. Si el copy lleva `{{variable}}` literal, dejalo fuera del bundle.
+- **Dentro de `<script>` no funciona `{ }`**: templ emite el bloque tal cual. Pasá el texto por un `data-*` traducido y leelo desde JS.
+- **Los catálogos son datos, no chrome.** Labels que vienen de `el.Langs` (catálogo `languages`, tools, etc.) se traducen en los catálogos de go-kiban, **no** en los bundles. Y ojo al revés: un catálogo puede ofrecer más idiomas de los que la UI tiene bundles — filtrá contra `IsSupported` antes de ofrecerlos en un selector.
+- **Agregar un idioma** = agregar `locales/<tag>.toml` + el tag en `NewCatalog(...)`. Nada más.
+
+#### Signos de pregunta y exclamación (aplica al **valor español** en `es.toml`)
+
+**Las preguntas abren con `¿` y cierran con `?`** — la apertura no es opcional. Aplica a títulos, copys de botones/links, mensajes de `hx-confirm`, banners y labels. Igual con exclamaciones: `¡` … `!`.
+
+- ✅ `"login.no_account" = "¿Aún no tienes cuenta?"`, `"profile.risk.confirm" = "¿Estás seguro de eliminar este contacto?"`
+- ❌ `"login.no_account" = "Aún no tienes cuenta?"`
+
+El equivalente en inglés **no** lleva signo de apertura (`"Don't have an account yet?"`).
 
 ### Tipos que reciben las views — cuándo domain, cuándo viewModel
 
@@ -337,9 +373,15 @@ Confusiones frecuentes:
 1. `go build ./...` compila sin errores.
 2. `go vet ./...` limpio.
 3. Si tocaste `.templ`, `templ generate` corrido **y** tests de views agregados/actualizados. `go test ./internal/view/<pkg>/... -cover` verde.
-4. Si tocaste algo bajo `tests/integration/`, documenta cómo correrlo en la respuesta.
-5. Si tocaste un usecase, `go test ./internal/usecases/<feature>/<action>/...` verde y el checklist de unit tests aplicado.
-6. **Si arreglaste un bug**: hay test de regresión nuevo o actualizado, y verificaste que falla sin el fix y pasa con el fix (ver [Tests de regresión para bugs](#tests-de-regresión-para-bugs)). Reportalo explícitamente en la respuesta.
+4. **Si agregaste o cambiaste texto visible al usuario**: va por `i18n.T`/`Tf` (nunca literal), la clave existe en **`es.toml` y `en.toml`**, y `TestBundleParity` está verde. Verificá que no quedó ninguna clave referenciada sin dar de alta (si no, la UI muestra el id crudo):
+    ```bash
+    grep -rhoE 'i18n\.T[f]?\(ctx, "[^"]+"' internal/view | grep -oE '"[^"]+"$' | sort -u > /tmp/used.txt
+    grep -oE '^"[^"]+"' internal/i18n/locales/es.toml | sort -u > /tmp/have.txt
+    comm -23 /tmp/used.txt /tmp/have.txt   # debe salir vacío
+    ```
+5. Si tocaste algo bajo `tests/integration/`, documenta cómo correrlo en la respuesta.
+6. Si tocaste un usecase, `go test ./internal/usecases/<feature>/<action>/...` verde y el checklist de unit tests aplicado.
+7. **Si arreglaste un bug**: hay test de regresión nuevo o actualizado, y verificaste que falla sin el fix y pasa con el fix (ver [Tests de regresión para bugs](#tests-de-regresión-para-bugs)). Reportalo explícitamente en la respuesta.
 
 ## Minimizar código en proyectos consumidores
 
