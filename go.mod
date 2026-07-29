@@ -59,6 +59,7 @@ require (
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/BurntSushi/toml v1.6.0
 	github.com/kiban-cloud/go-kiban-fullstack/logger v0.0.0-00010101000000-000000000000
 	github.com/nicksnyder/go-i18n/v2 v2.6.1

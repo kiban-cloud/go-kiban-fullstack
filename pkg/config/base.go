@@ -62,6 +62,11 @@ func LoadEnv(cfg any) {
 		loadLocalEnvFiles()
 	}
 
+	// After the files (so a local value still wins) and before parsing (so the
+	// parsed config sees it). Outside the K_REVISION branch on purpose: Cloud
+	// Run is exactly where there is a metadata server to ask.
+	resolveGoogleCloudProjectID()
+
 	if err := env.Parse(cfg); err != nil {
 		panic(errorsWrapper.Wrap(err, "error parsing environment variables"))
 	}
