@@ -280,8 +280,11 @@ func LogHttpInfo(ctx context.Context, info RequestInfo, isPanic bool) {
 		}
 	}
 
-	// Bodies solo fuera de prod, para no filtrar PII.
-	if !isProd {
+	// Bodies: fuera de prod siempre; en prod, solo cuando el request fue un error
+	// (status >= 400 o error taggeado), para diagnosticar la falla sin loguear PII
+	// de los requests OK. Los 2xx sin error en prod ya se descartan arriba. Los
+	// campos de body y headers sensibles se redactan en ambos casos.
+	if !isProd || info.StatusCode >= 400 || info.Error != nil {
 		attrs = appendRequestBodyAttrs(attrs, requestContentType, info.RequestBody)
 		attrs = appendResponseBodyAttrs(attrs, info.ContentType, info.ResponseBody)
 	}
