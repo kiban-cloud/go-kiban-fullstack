@@ -122,7 +122,8 @@ if err := c.ShouldBind(&req); err != nil {
 
 ## Convenciones de vistas (templ)
 
-- Archivos `.templ` en `internal/view/<page>/`; generan `*_templ.go` que **se commitea**.
+- Archivos `.templ` en `internal/view/<page>/`; generan `*_templ.go`. **Si se commitean o no depende del proyecto — mirá su `.gitignore` antes de asumir.** Lo normal es que NO: siete de los diez repos con templ los tienen en `.gitignore` y los produce el build (`RUN go tool templ generate` en el Dockerfile). Las excepciones que sí los versionan son `go-kiban-design-system` y `microservices`. `klin-backend` está a medias: tiene la regla en `.gitignore` pero arrastra 10 archivos ya rastreados de antes de agregarla (el `.gitignore` no afecta a lo ya versionado; se limpia con `git rm --cached`).
+  - **Síntoma cuando NO se commitean**: tras un `git pull` que traiga cambios en un `.templ`, tu `_templ.go` local queda viejo y `go build ./...` falla con símbolos inexistentes — típicamente `view.X undefined (type Y has no field or method X)`. No es un merge roto ni un checklist que alguien se saltó: corré `templ generate` y compila.
 - Cuando modifiques un `.templ`, ejecuta `templ generate` antes de correr tests.
 - HTMX para interactividad: `hx-post`, `hx-target`, `hx-swap` — no JavaScript custom salvo casos puntuales.
 - Renderizado server-side vía `view.Render(c, status, Component(data))`.
