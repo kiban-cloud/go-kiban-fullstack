@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -444,3 +445,45 @@ func fmtErr(s string) error { return &simpleErr{s} }
 type simpleErr struct{ msg string }
 
 func (e *simpleErr) Error() string { return e.msg }
+
+// La lista de campos sensibles se compara por nombre exacto, así que un nombre
+// vecino al que ya está cubierto pasa de largo. Fue el caso real de `secretKey`
+// en la configuración de factura.com: `apiKey` salía redactado y la secret key
+// se escribía completa en el log del request.
+func TestRedactFormValues_CoversSecretKeyVariants(t *testing.T) {
+	values := url.Values{
+		"apiKey":       {"visible-pero-redactado"},
+		"secretKey":    {"no-debe-aparecer-1"},
+		"secret_key":   {"no-debe-aparecer-2"},
+		"clientSecret": {"no-debe-aparecer-3"},
+		"privateKey":   {"no-debe-aparecer-4"},
+		"serie":        {"5501630"},
+	}
+
+	redacted := redactFormValues(values)
+
+	for _, field := range []string{"apiKey", "secretKey", "secret_key", "clientSecret", "privateKey"} {
+		if got := redacted[field]; len(got) != 1 || got[0] != "[REDACTED]" {
+			t.Errorf("%s should be redacted, got %v", field, got)
+		}
+	}
+	// Lo que no es secreto se sigue logueando: redactar de más deja los logs
+	// inservibles para diagnosticar.
+	if got := redacted["serie"]; len(got) != 1 || got[0] != "5501630" {
+		t.Errorf("serie should be logged verbatim, got %v", got)
+	}
+}
+
+func TestRedactJSONObject_CoversSecretKeyVariants(t *testing.T) {
+	redacted := redactJSONObject(map[string]any{
+		"secretKey": "no-debe-aparecer",
+		"folio":     "F-001",
+	})
+
+	if redacted["secretKey"] != "[REDACTED]" {
+		t.Errorf("secretKey should be redacted, got %v", redacted["secretKey"])
+	}
+	if redacted["folio"] != "F-001" {
+		t.Errorf("folio should be logged verbatim, got %v", redacted["folio"])
+	}
+}
