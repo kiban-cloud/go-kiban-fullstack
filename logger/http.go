@@ -29,7 +29,17 @@ var sensitiveFormFields = map[string]bool{
 	"api_key":          true,
 	"apikey":           true,
 	"secret":           true,
-	"authorization":    true,
+	// El match es por nombre exacto, así que cada grafía de un mismo campo se
+	// declara aparte. `secretKey` es la de la configuración de factura.com:
+	// estaba fuera de la lista y su valor se escribía completo en el log del
+	// request, con `apiKey` redactado justo al lado.
+	"secret_key":    true,
+	"secretkey":     true,
+	"client_secret": true,
+	"clientsecret":  true,
+	"private_key":   true,
+	"privatekey":    true,
+	"authorization": true,
 }
 
 // sensitiveHeaders se redactan al loguear los headers del request (el valor se
