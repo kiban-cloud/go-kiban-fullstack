@@ -45,6 +45,23 @@ go run ./cmd/api                                         # arranca local
 templ generate                                           # regenera .templ → _templ.go
 ```
 
+## Hook pre-push: verificarlo al empezar a trabajar en un repo
+
+Los repos que ya adoptaron la estrategia de pruebas traen un `Makefile` con `check` y un
+`.githooks/pre-push` que lo corre antes de cada push. Git no permite que el repo instale el hook
+solo: es una configuración local de cada máquina (`core.hooksPath`), y no hay garantía de que el
+desarrollador haya corrido `make hooks`. Por eso lo verifica Claude.
+
+**Al primer cambio de código en un repo, si existe `.githooks/pre-push`**, revisá
+`git config core.hooksPath`. Si no vale `.githooks`, corré `make hooks` (solo toca la config git
+local, no el repo ni el índice; no cuenta como commit ni push) y avisá en la respuesta con una línea.
+Si el repo no tiene `.githooks/`, no hagas nada: todavía no adoptó la estrategia.
+
+Cadencia acordada (2026-09-17): `make check` antes de cada push (lo hace el hook), `make lint` al
+abrir la PR (solo hallazgos nuevos respecto a `origin/develop`), `make vet` a demanda. Nada
+obligatorio antes de un commit. El CI repite `check` y `lint` en cada push y PR; lo local ahorra la
+vuelta, no la sustituye. Detalle y decisiones en `kibancloud/docu/estrategia-de-pruebas.md`.
+
 ## Reglas para cambios de código
 
 - **No crees archivos `*.md` ni `README`** salvo que se pida explícitamente.
