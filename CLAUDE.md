@@ -45,17 +45,30 @@ go run ./cmd/api                                         # arranca local
 templ generate                                           # regenera .templ → _templ.go
 ```
 
-## Hook pre-push: verificarlo al empezar a trabajar en un repo
+## Hooks de git: verificarlos al empezar a trabajar en un repo
 
-Los repos que ya adoptaron la estrategia de pruebas traen un `Makefile` con `check` y un
-`.githooks/pre-push` que lo corre antes de cada push. Git no permite que el repo instale el hook
-solo: es una configuración local de cada máquina (`core.hooksPath`), y no hay garantía de que el
-desarrollador haya corrido `make hooks`. Por eso lo verifica Claude.
+Los repos traen sus hooks versionados en `.githooks/`. Hoy hay dos:
 
-**Al primer cambio de código en un repo, si existe `.githooks/pre-push`**, revisá
-`git config core.hooksPath`. Si no vale `.githooks`, corré `make hooks` (solo toca la config git
-local, no el repo ni el índice; no cuenta como commit ni push) y avisá en la respuesta con una línea.
-Si el repo no tiene `.githooks/`, no hagas nada: todavía no adoptó la estrategia.
+- `pre-commit` (los siete módulos con vistas templ: kiban-cloud, rekon, klin, workfloo, crm, link
+  y go-kiban-design-system): regenera los `*_templ.go` de los `.templ` que entran en el commit y
+  los agrega al índice. Los `*_templ.go` **se commitean** (Go y kiban-proto consumen el módulo tal
+  como está en git; sin ellos la vista no existe) y tienen que coincidir con su `.templ`. La
+  generación es determinista: mismo `.templ` y misma versión de templ dan el mismo archivo.
+- `pre-push` (los repos que adoptaron la estrategia de pruebas, con `Makefile`): corre `make check`.
+
+Git no permite que el repo instale los hooks solo: es una configuración local de cada máquina
+(`core.hooksPath`), y no hay garantía de que el desarrollador la haya hecho. Por eso lo verifica
+Claude.
+
+**Al primer cambio de código en un repo, si existe `.githooks/`**, revisá `git config core.hooksPath`.
+Si no vale `.githooks`, corré `make hooks` si el repo tiene `Makefile`, o directamente
+`git config core.hooksPath .githooks` si no (solo toca la config git local, no el repo ni el índice;
+no cuenta como commit ni push), y avisá en la respuesta con una línea. Si el repo no tiene
+`.githooks/`, no hagas nada.
+
+El CI repite el control del pre-commit: el workflow `templ.yml` (o `make check` vía go-ci en
+kiban-cloud) regenera y falla si algún `*_templ.go` cambió. Cuando falle, no lo arregles a mano:
+`go tool templ generate`, commitear lo que cambie, y confirmar que el hook está instalado.
 
 Cadencia acordada (2026-09-17): `make check` antes de cada push (lo hace el hook), `make lint` al
 abrir la PR (solo hallazgos nuevos respecto a `origin/develop`), `make vet` a demanda. Nada
