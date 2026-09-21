@@ -73,7 +73,7 @@ kiban-cloud) regenera y falla si algún `*_templ.go` cambió. Cuando falle, no l
 Cadencia acordada (2026-09-17): `make check` antes de cada push (lo hace el hook), `make lint` al
 abrir la PR (solo hallazgos nuevos respecto a `origin/develop`), `make vet` a demanda. Nada
 obligatorio antes de un commit. El CI repite `check` y `lint` en cada push y PR; lo local ahorra la
-vuelta, no la sustituye. Detalle y decisiones en `kibancloud/docu/estrategia-de-pruebas.md`.
+vuelta, no la sustituye. Detalle y decisiones en [kiban-infra/docs/estrategia-de-pruebas.md](https://github.com/kiban-cloud/kiban-infra/blob/main/docs/estrategia-de-pruebas.md).
 
 ## Reglas para cambios de código
 
