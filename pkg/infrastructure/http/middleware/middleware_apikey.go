@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"net/http"
-	"strings"
 
 	http_errors "github.com/kiban-cloud/go-kiban-fullstack/pkg/infrastructure/http/errors"
 
@@ -63,7 +62,7 @@ func (m *ApiKeyMiddleware) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		isSandboxHost := strings.HasPrefix(c.Request.Host, "sandbox.")
+		isSandboxHost := IsSandboxHost(c.Request.Host)
 		if isSandboxHost != apiKey.Sandbox {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, http_errors.ErrorResponse{
 				Message: "api key environment does not match host",
