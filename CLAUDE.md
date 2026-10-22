@@ -47,7 +47,7 @@ templ generate                                           # regenera .templ → _
 
 ## Hooks de git: verificarlos al empezar a trabajar en un repo
 
-Los repos traen sus hooks versionados en `.githooks/`. Hoy hay dos:
+Los repos traen sus hooks versionados en `.githooks/`. Hoy hay tres:
 
 - `pre-commit` (los siete módulos con vistas templ: kiban-cloud, rekon, klin, workfloo, crm, link
   y go-kiban-design-system): regenera los `*_templ.go` de los `.templ` que entran en el commit y
@@ -55,6 +55,9 @@ Los repos traen sus hooks versionados en `.githooks/`. Hoy hay dos:
   como está en git; sin ellos la vista no existe) y tienen que coincidir con su `.templ`. La
   generación es determinista: mismo `.templ` y misma versión de templ dan el mismo archivo.
 - `pre-push` (los repos que adoptaron la estrategia de pruebas, con `Makefile`): corre `make check`.
+- `commit-msg` (todos los repos de kiban cloud): rechaza el commit si la primera línea pasa de 72
+  caracteres, viene truncada con «…» o no la sigue una línea en blanco. Solo llama al script de
+  `kiban-infra`, donde vive la regla: [kiban-infra/docs/commits-y-prs.md](https://github.com/kiban-cloud/kiban-infra/blob/main/docs/commits-y-prs.md).
 
 Git no permite que el repo instale los hooks solo: es una configuración local de cada máquina
 (`core.hooksPath`), y no hay garantía de que el desarrollador la haya hecho. Por eso lo verifica
