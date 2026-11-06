@@ -301,10 +301,10 @@ func TestLogHttpInfo_ProdGate(t *testing.T) {
 	}
 }
 
-// TestLogHttpInfo_ProdLogsBodyOnError cubre el fix: en Cloud-Run-prod, un request
-// con error (status >= 400) DEBE loguear request/response body para poder
-// diagnosticar, con los campos sensibles redactados. Un 2xx sin error en prod se
-// descarta antes (cubierto por ProdGate), así que no filtra PII de requests OK.
+// TestLogHttpInfo_ProdLogsBodyOnError: en Cloud-Run-prod, un request con error
+// (status >= 400) loguea el response body y, del request body, solo sus llaves y
+// su tamaño: los valores pueden ser datos personales (RFC, CURP, los campos de un
+// formulario de workfloo) que ninguna lista de nombres alcanza a redactar.
 func TestLogHttpInfo_ProdLogsBodyOnError(t *testing.T) {
 	var sink bytes.Buffer
 	handler := slog.NewJSONHandler(&sink, &slog.HandlerOptions{Level: slog.LevelDebug})
@@ -321,27 +321,26 @@ func TestLogHttpInfo_ProdLogsBodyOnError(t *testing.T) {
 		Path:         "/api/v1/workfloo/198410/form",
 		StatusCode:   400,
 		Headers:      map[string][]string{"Content-Type": {"application/json"}},
-		RequestBody:  `{"postal_code":"06700","password":"secret123"}`,
+		RequestBody:  `{"postal_code":"06700","rfc":"GODE561231GR8","password":"secret123"}`,
 		ResponseBody: `{"error":"invalid postal code"}`,
 		ContentType:  "application/json",
 	}
 	LogHttpInfo(context.Background(), info, false)
 
 	out := sink.String()
-	if !strings.Contains(out, "request_body") {
-		t.Errorf("prod 400 debe loguear request_body, got:\n%s", out)
+	for _, valor := range []string{"06700", "GODE561231GR8", "secret123"} {
+		if strings.Contains(out, valor) {
+			t.Errorf("prod no debe loguear valores del request body (%s), got:\n%s", valor, out)
+		}
 	}
-	if !strings.Contains(out, "response_body") {
-		t.Errorf("prod 400 debe loguear response_body, got:\n%s", out)
+	if !strings.Contains(out, `"request_body_keys":["password","postal_code","rfc"]`) {
+		t.Errorf("prod 400 debe loguear las llaves del request body, got:\n%s", out)
 	}
-	if !strings.Contains(out, "06700") {
-		t.Errorf("el campo no-sensible (postal_code) debe aparecer, got:\n%s", out)
+	if !strings.Contains(out, `"request_body_size":`) {
+		t.Errorf("prod 400 debe loguear el tamaño del request body, got:\n%s", out)
 	}
-	if strings.Contains(out, "secret123") {
-		t.Errorf("el campo sensible (password) NO debe aparecer en claro, got:\n%s", out)
-	}
-	if !strings.Contains(out, "REDACTED") {
-		t.Errorf("el campo sensible debe quedar redactado, got:\n%s", out)
+	if !strings.Contains(out, "invalid postal code") {
+		t.Errorf("prod 400 debe loguear el response body, got:\n%s", out)
 	}
 }
 
