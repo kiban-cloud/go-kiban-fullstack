@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -193,6 +194,40 @@ func appendRequestBodyAttrs(attrs []slog.Attr, contentType, body string) []slog.
 	}
 }
 
+// appendRequestBodyShapeAttrs agrega del request body solo su tamaño y, si es un
+// objeto JSON o un form, sus llaves de primer nivel. Nunca los valores.
+func appendRequestBodyShapeAttrs(attrs []slog.Attr, contentType, body string) []slog.Attr {
+	if body == "" {
+		return attrs
+	}
+
+	attrs = append(attrs, slog.Int("request_body_size", len(body)))
+
+	var keys []string
+	switch {
+	case IsJSONContentType(contentType):
+		var parsedObj map[string]any
+		if err := json.Unmarshal([]byte(body), &parsedObj); err == nil {
+			keys = make([]string, 0, len(parsedObj))
+			for k := range parsedObj {
+				keys = append(keys, k)
+			}
+		}
+	case IsFormURLEncodedContentType(contentType):
+		if values, err := url.ParseQuery(body); err == nil {
+			keys = make([]string, 0, len(values))
+			for k := range values {
+				keys = append(keys, k)
+			}
+		}
+	}
+	if keys != nil {
+		sort.Strings(keys)
+		attrs = append(attrs, slog.Any("request_body_keys", keys))
+	}
+	return attrs
+}
+
 // appendResponseBodyAttrs agrega el response body. HTML se trunca; JSON se loguea completo.
 func appendResponseBodyAttrs(attrs []slog.Attr, contentType, body string) []slog.Attr {
 	if body == "" {
@@ -290,12 +325,17 @@ func LogHttpInfo(ctx context.Context, info RequestInfo, isPanic bool) {
 		}
 	}
 
-	// Bodies: fuera de prod siempre; en prod, solo cuando el request fue un error
-	// (status >= 400 o error taggeado), para diagnosticar la falla sin loguear PII
-	// de los requests OK. Los 2xx sin error en prod ya se descartan arriba. Los
-	// campos de body y headers sensibles se redactan en ambos casos.
-	if !isProd || info.StatusCode >= 400 || info.Error != nil {
+	// Bodies: fuera de prod siempre, con los campos sensibles redactados; en prod,
+	// solo cuando el request fue un error (status >= 400 o error taggeado). Los
+	// 2xx sin error en prod ya se descartan arriba.
+	// En prod el request body va sin valores: los campos con datos personales
+	// (RFC, CURP, nombre, los de un formulario de workfloo) no tienen un nombre
+	// fijo que se pueda redactar, así que se loguean solo las llaves y el tamaño.
+	if !isProd {
 		attrs = appendRequestBodyAttrs(attrs, requestContentType, info.RequestBody)
+		attrs = appendResponseBodyAttrs(attrs, info.ContentType, info.ResponseBody)
+	} else if info.StatusCode >= 400 || info.Error != nil {
+		attrs = appendRequestBodyShapeAttrs(attrs, requestContentType, info.RequestBody)
 		attrs = appendResponseBodyAttrs(attrs, info.ContentType, info.ResponseBody)
 	}
 
