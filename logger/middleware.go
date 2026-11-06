@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,11 +96,20 @@ func Middleware(cfg MiddlewareConfig) gin.HandlerFunc {
 		w := &responseBodyWriter{body: &bytes.Buffer{}, ResponseWriter: c.Writer}
 		c.Writer = w
 
+		var rl *requestLabels
+		if cfg.Labels != nil {
+			var ctx context.Context
+			ctx, rl = withRequestLabels(c.Request.Context(), func() map[string]string { return cfg.Labels(c) })
+			c.Request = c.Request.WithContext(ctx)
+		}
+
 		// El logueo va en defer para correr haya o no panic.
 		defer func() {
 			ctx := c.Request.Context()
 			if cfg.Labels != nil {
-				ctx = WithLabels(ctx, cfg.Labels(c))
+				labels := cfg.Labels(c)
+				rl.freeze(labels)
+				ctx = WithLabels(ctx, labels)
 			}
 
 			info := RequestInfo{

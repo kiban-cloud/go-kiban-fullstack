@@ -136,7 +136,17 @@ func FromContext(ctx context.Context) *slog.Logger {
 	// del Init (compat: datos-non-stop/reportalos lo usan para tenant_id).
 	// Saltamos las keys de correlación: FromContext ya las puso desde el context;
 	// si las labels (p.ej. los tags de auth) las traen, duplicarían trace/request_id.
+	// Las del request (las que el auth dejó durante el handler) y las de
+	// WithLabels traen las mismas keys en la línea de acceso: se juntan en un
+	// map para no repetir el atributo.
+	labels := map[string]string{}
+	for k, v := range requestLabelsFromContext(ctx) {
+		labels[k] = v
+	}
 	for k, v := range labelsFromContext(ctx) {
+		labels[k] = v
+	}
+	for k, v := range labels {
 		if v != "" && !isReservedCorrelationKey(k) {
 			attrs = append(attrs, slog.String(k, v))
 		}

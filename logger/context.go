@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // Headers de correlación. Cloud Run inyecta TRACE_HEADER automáticamente; el
@@ -45,7 +46,52 @@ const (
 	keyTrace
 	keyTraceID
 	keyLabels
+	keyRequestLabels
 )
+
+// requestLabels le da a FromContext las labels del request mientras el handler
+// corre. El middleware lo pone en el context ANTES de c.Next(): en ese momento
+// el auth todavía no corrió y no hay tenant, así que guarda la función que lo
+// lee y FromContext la llama al loguear, cuando el auth ya lo dejó en el gin
+// context.
+//
+// Al terminar el request el middleware lo congela con una copia fija: gin
+// recicla su Context para el siguiente request, y una goroutine que loguee
+// después leería el tenant de otro.
+type requestLabels struct {
+	mu     sync.Mutex
+	read   func() map[string]string
+	frozen map[string]string
+}
+
+func withRequestLabels(ctx context.Context, read func() map[string]string) (context.Context, *requestLabels) {
+	rl := &requestLabels{read: read}
+	return context.WithValue(ctx, keyRequestLabels, rl), rl
+}
+
+func (rl *requestLabels) freeze(labels map[string]string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.read = nil
+	rl.frozen = labels
+}
+
+func (rl *requestLabels) get() map[string]string {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if rl.read != nil {
+		return rl.read()
+	}
+	return rl.frozen
+}
+
+func requestLabelsFromContext(ctx context.Context) map[string]string {
+	rl, _ := ctx.Value(keyRequestLabels).(*requestLabels)
+	if rl == nil {
+		return nil
+	}
+	return rl.get()
+}
 
 // WithRequestAndTrace propaga request_id y trace en el context para que los logs
 // de negocio (FromContext) se correlacionen con el request que los originó.
